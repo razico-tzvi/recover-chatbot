@@ -1,0 +1,24 @@
+{
+  "name": "recover-chatbot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI customer chatbot for BigCommerce storefronts (Claude-powered).",
+  "workspaces": [
+    "packages/shared",
+    "packages/server",
+    "packages/widget"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "build:shared": "npm run build -w @recover/shared",
+    "build:server": "npm run build -w @recover/server",
+    "build:widget": "npm run build -w @recover/widget",
+    "dev:server": "npm run dev -w @recover/server",
+    "dev:widget": "npm run dev -w @recover/widget",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
