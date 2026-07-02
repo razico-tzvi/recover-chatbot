@@ -1,12 +1,17 @@
+.gadget/
 node_modules/
-dist/
-*.log
+**/.DS_Store
+.react-router/
+
+# Secrets & local files (do not commit)
 .env
 .env.*
 !.env.example
-.DS_Store
-coverage/
+
+# Legacy monorepo build artifacts / local data
+dist/
 *.tsbuildinfo
 data/
 *.db
 *.db-*
+yarn-error.log

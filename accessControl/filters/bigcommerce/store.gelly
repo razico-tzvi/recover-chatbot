@@ -1,0 +1,3 @@
+filter ($session: Session) on BigCommerceStore [
+  where id == $session.bigcommerceStoreId
+]
