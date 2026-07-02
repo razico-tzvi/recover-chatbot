@@ -1,0 +1,8 @@
+# ggt sync ignore — keep the pre-Gadget monorepo (and secrets) out of the sync.
+packages/
+package-lock.json
+data/
+tsconfig.base.json
+.env
+.env.example
+.env.*
