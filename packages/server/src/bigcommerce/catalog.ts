@@ -1,4 +1,6 @@
 import { bcGet } from "./client.js";
+import { config } from "../config.js";
+import { mockSearchProducts, mockGetProductDetail } from "./mock.js";
 
 /** Trimmed product shape we expose to the model and the shopper. */
 export interface ProductSummary {
@@ -78,6 +80,7 @@ export interface ProductSearchParams {
 export async function searchProducts(
   params: ProductSearchParams,
 ): Promise<ProductSummary[]> {
+  if (config.MOCK_BIGCOMMERCE) return mockSearchProducts(params);
   const limit = Math.min(params.limit ?? 5, 10);
   const data = await bcGet<{ data: BcProduct[] }>("/v3/catalog/products", {
     query: {
@@ -97,6 +100,7 @@ export async function searchProducts(
 export async function getProductDetail(
   productId: number,
 ): Promise<ProductDetail | null> {
+  if (config.MOCK_BIGCOMMERCE) return mockGetProductDetail(productId);
   try {
     const { data: p } = await bcGet<{ data: BcProduct }>(
       `/v3/catalog/products/${productId}`,

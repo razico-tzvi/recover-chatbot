@@ -95,6 +95,32 @@ exactly as a storefront would. Make sure `ALLOWED_ORIGINS` includes
 
 ---
 
+## Local testing without Anthropic / BigCommerce credentials
+
+Two escape hatches let you run the whole app offline:
+
+- **`LLM_PROVIDER=openai`** — point the chat loop at any OpenAI-compatible
+  endpoint (Ollama, LM Studio, llama.cpp, vLLM) instead of Anthropic. Set
+  `OPENAI_BASE_URL` (e.g. `http://localhost:11434/v1`) and `OPENAI_MODEL` (a
+  tool-calling model such as `qwen2.5` or `llama3.1`). The default
+  `LLM_PROVIDER=anthropic` path is unchanged.
+- **`MOCK_BIGCOMMERCE=true`** — serve a small built-in sample catalog and one
+  sample order (billing email `jane@example.com`, order `1001`) so the product
+  and order tools work with no real store.
+
+Example `.env` for a fully local run:
+
+```
+LLM_PROVIDER=openai
+OPENAI_BASE_URL=http://localhost:11434/v1
+OPENAI_MODEL=qwen2.5
+MOCK_BIGCOMMERCE=true
+ALLOWED_ORIGINS=http://localhost:8080
+```
+
+> Note: small local models vary in tool-calling reliability. This mode is for
+> exercising the pipeline/UI, not for judging answer quality.
+
 ## Build for production
 
 ```bash

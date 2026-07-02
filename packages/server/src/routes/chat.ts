@@ -37,19 +37,22 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       Connection: "keep-alive",
     });
 
-    const write = (event: StreamEvent) => {
-      if (!res.writableEnded) res.write(JSON.stringify(event) + "\n");
-    };
-
+    // The client is gone only when the RESPONSE socket closes before we've
+    // finished. (Do NOT key off request.raw "close" — that fires as soon as
+    // the request body is read, long before the client disconnects.)
     let clientGone = false;
-    request.raw.on("close", () => {
-      clientGone = true;
+    res.on("close", () => {
+      if (!res.writableEnded) clientGone = true;
     });
 
+    const write = (event: StreamEvent) => {
+      if (!clientGone && !res.writableEnded && !res.destroyed) {
+        res.write(JSON.stringify(event) + "\n");
+      }
+    };
+
     try {
-      await runChatTurn(messages, (event) => {
-        if (!clientGone) write(event);
-      });
+      await runChatTurn(messages, write);
     } catch (err) {
       request.log.error({ err }, "chat turn failed");
       write({ type: "error", message: "Sorry, something went wrong. Please try again." });

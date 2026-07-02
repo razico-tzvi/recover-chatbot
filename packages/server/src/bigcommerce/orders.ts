@@ -1,5 +1,7 @@
 import { bcGet } from "./client.js";
 import { emailsMatch } from "./verify.js";
+import { config } from "../config.js";
+import { mockLookupOrder } from "./mock.js";
 
 export interface OrderStatus {
   id: number;
@@ -49,6 +51,8 @@ export async function lookupOrder(
   orderId: number,
   email: string,
 ): Promise<OrderStatus | "not_found" | "email_mismatch"> {
+  if (config.MOCK_BIGCOMMERCE) return mockLookupOrder(orderId, email);
+
   let order: BcOrder;
   try {
     order = await bcGet<BcOrder>(`/v2/orders/${orderId}`);

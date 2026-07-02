@@ -41,7 +41,7 @@ export async function bcGet<T>(path: string, opts: RequestOpts = {}): Promise<T>
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(url, {
       headers: {
-        "X-Auth-Token": config.BC_ACCESS_TOKEN,
+        "X-Auth-Token": config.BC_ACCESS_TOKEN ?? "",
         Accept: "application/json",
       },
     });

@@ -19,17 +19,22 @@ Rules you must always follow:
 
 The store's current policies and FAQ are below; use search_faq to find specific sections, but you may also rely on this text directly for policy questions.`;
 
+/** The full system prompt as plain text (persona + policies). */
+export async function buildSystemText(): Promise<string> {
+  const policies = await loadPolicies();
+  return `${PERSONA}\n\n--- STORE POLICIES & FAQ ---\n${policies}`;
+}
+
 /**
  * Build the system prompt as cacheable text blocks. The persona + policies are
  * stable across turns, so we mark the last block with cache_control to get
  * prompt-cache hits on every follow-up message.
  */
 export async function buildSystem(): Promise<Anthropic.TextBlockParam[]> {
-  const policies = await loadPolicies();
   return [
     {
       type: "text",
-      text: `${PERSONA}\n\n--- STORE POLICIES & FAQ ---\n${policies}`,
+      text: await buildSystemText(),
       cache_control: { type: "ephemeral" },
     },
   ];

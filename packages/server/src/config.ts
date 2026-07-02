@@ -5,13 +5,27 @@ import { z } from "zod";
  * the process exits with a clear message if anything required is missing.
  */
 const schema = z.object({
-  // Anthropic
-  ANTHROPIC_API_KEY: z.string().min(1, "ANTHROPIC_API_KEY is required"),
+  // LLM provider selection. "anthropic" (default, production) or "openai"
+  // (any OpenAI-compatible endpoint — Ollama, LM Studio, llama.cpp — for local
+  // testing / self-hosting).
+  LLM_PROVIDER: z.enum(["anthropic", "openai"]).default("anthropic"),
+
+  // Anthropic (required when LLM_PROVIDER=anthropic)
+  ANTHROPIC_API_KEY: z.string().optional(),
   ANTHROPIC_MODEL: z.string().default("claude-sonnet-4-6"),
 
-  // BigCommerce
-  BC_STORE_HASH: z.string().min(1, "BC_STORE_HASH is required"),
-  BC_ACCESS_TOKEN: z.string().min(1, "BC_ACCESS_TOKEN is required"),
+  // OpenAI-compatible (required when LLM_PROVIDER=openai)
+  OPENAI_BASE_URL: z.string().url().optional(),
+  OPENAI_MODEL: z.string().optional(),
+  OPENAI_API_KEY: z.string().default("not-needed"),
+
+  // BigCommerce (required unless MOCK_BIGCOMMERCE=true)
+  MOCK_BIGCOMMERCE: z
+    .string()
+    .default("false")
+    .transform((s) => s.toLowerCase() === "true"),
+  BC_STORE_HASH: z.string().optional(),
+  BC_ACCESS_TOKEN: z.string().optional(),
 
   // Server
   PORT: z.coerce.number().int().positive().default(3000),
@@ -37,7 +51,31 @@ const schema = z.object({
   SLACK_WEBHOOK_URL: z.string().url().optional().or(z.literal("")),
 });
 
-const parsed = schema.safeParse(process.env);
+const parsed = schema
+  .superRefine((v, ctx) => {
+    if (v.LLM_PROVIDER === "anthropic" && !v.ANTHROPIC_API_KEY) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["ANTHROPIC_API_KEY"],
+        message: "required when LLM_PROVIDER=anthropic",
+      });
+    }
+    if (v.LLM_PROVIDER === "openai" && (!v.OPENAI_BASE_URL || !v.OPENAI_MODEL)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["OPENAI_BASE_URL"],
+        message: "OPENAI_BASE_URL and OPENAI_MODEL are required when LLM_PROVIDER=openai",
+      });
+    }
+    if (!v.MOCK_BIGCOMMERCE && (!v.BC_STORE_HASH || !v.BC_ACCESS_TOKEN)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["BC_STORE_HASH"],
+        message: "BC_STORE_HASH and BC_ACCESS_TOKEN are required unless MOCK_BIGCOMMERCE=true",
+      });
+    }
+  })
+  .safeParse(process.env);
 
 if (!parsed.success) {
   const issues = parsed.error.issues
