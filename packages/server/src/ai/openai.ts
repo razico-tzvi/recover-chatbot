@@ -1,7 +1,7 @@
 import type { ChatMessage, StreamEvent } from "@recover/shared";
 import { config } from "../config.js";
 import { buildSystemText } from "./systemPrompt.js";
-import { toolDefinitions, runTool, toolStatusLabel, type ToolContext } from "./tools.js";
+import { toolDefinitions, runTool, toolStatusLabel, type ToolContext, type TurnContext } from "./tools.js";
 
 const MAX_ITERATIONS = 6;
 // Generous headroom: reasoning models spend tokens on chain-of-thought
@@ -39,10 +39,11 @@ const openaiTools = toolDefinitions.map((t) => ({
 export async function runOpenAITurn(
   history: ChatMessage[],
   emit: (event: StreamEvent) => void,
+  turn: TurnContext = {},
 ): Promise<void> {
-  const ctx: ToolContext = { transcript: history };
+  const ctx: ToolContext = { transcript: history, storeHash: turn.storeHash, settings: turn.settings };
   const messages: OpenAIMessage[] = [
-    { role: "system", content: await buildSystemText() },
+    { role: "system", content: await buildSystemText(turn.settings?.systemExtra) },
     ...history.map((m) => ({ role: m.role, content: m.content })),
   ];
 

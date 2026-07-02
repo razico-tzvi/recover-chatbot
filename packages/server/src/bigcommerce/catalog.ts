@@ -79,10 +79,11 @@ export interface ProductSearchParams {
 /** Keyword/category/price search over the catalog. */
 export async function searchProducts(
   params: ProductSearchParams,
+  storeHash?: string,
 ): Promise<ProductSummary[]> {
   if (config.MOCK_BIGCOMMERCE) return mockSearchProducts(params);
   const limit = Math.min(params.limit ?? 5, 10);
-  const data = await bcGet<{ data: BcProduct[] }>("/v3/catalog/products", {
+  const data = await bcGet<{ data: BcProduct[] }>(storeHash, "/v3/catalog/products", {
     query: {
       keyword: params.keyword,
       "categories:in": params.categoryId,
@@ -99,10 +100,12 @@ export async function searchProducts(
 /** Full detail for one product, including variants and availability. */
 export async function getProductDetail(
   productId: number,
+  storeHash?: string,
 ): Promise<ProductDetail | null> {
   if (config.MOCK_BIGCOMMERCE) return mockGetProductDetail(productId);
   try {
     const { data: p } = await bcGet<{ data: BcProduct }>(
+      storeHash,
       `/v3/catalog/products/${productId}`,
       { query: { include: "primary_image,variants" } },
     );

@@ -50,12 +50,13 @@ interface BcShipment {
 export async function lookupOrder(
   orderId: number,
   email: string,
+  storeHash?: string,
 ): Promise<OrderStatus | "not_found" | "email_mismatch"> {
   if (config.MOCK_BIGCOMMERCE) return mockLookupOrder(orderId, email);
 
   let order: BcOrder;
   try {
-    order = await bcGet<BcOrder>(`/v2/orders/${orderId}`);
+    order = await bcGet<BcOrder>(storeHash, `/v2/orders/${orderId}`);
   } catch (err) {
     if (err instanceof Error && err.message.includes("404")) return "not_found";
     throw err;
@@ -69,8 +70,8 @@ export async function lookupOrder(
   }
 
   const [products, shipments] = await Promise.all([
-    bcGet<BcOrderProduct[]>(`/v2/orders/${orderId}/products`).catch(() => []),
-    bcGet<BcShipment[]>(`/v2/orders/${orderId}/shipments`).catch(() => []),
+    bcGet<BcOrderProduct[]>(storeHash, `/v2/orders/${orderId}/products`).catch(() => []),
+    bcGet<BcShipment[]>(storeHash, `/v2/orders/${orderId}/shipments`).catch(() => []),
   ]);
 
   return {

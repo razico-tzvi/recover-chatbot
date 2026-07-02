@@ -4,11 +4,22 @@ import { searchProducts, getProductDetail } from "../bigcommerce/catalog.js";
 import { lookupOrder } from "../bigcommerce/orders.js";
 import { searchFaq } from "../knowledge/faq.js";
 import { escalate } from "../escalation.js";
+import type { StoreSettings } from "../db/settings.js";
+
+/** Per-turn store context passed from the route into the provider loop. */
+export interface TurnContext {
+  storeHash?: string;
+  settings?: StoreSettings;
+}
 
 /** Context handed to every tool handler for the current turn. */
 export interface ToolContext {
   /** Full conversation so far (used by escalate_to_human). */
   transcript: ChatMessage[];
+  /** Store hash for this turn (app mode); undefined in single-store/dev mode. */
+  storeHash?: string;
+  /** Resolved per-store settings (app mode). */
+  settings?: StoreSettings;
 }
 
 /** Anthropic tool definitions advertised to the model. */
@@ -112,13 +123,16 @@ export async function runTool(
   try {
     switch (name) {
       case "search_products": {
-        const results = await searchProducts({
-          keyword: asString(input.keyword),
-          minPrice: asNumber(input.min_price),
-          maxPrice: asNumber(input.max_price),
-          categoryId: asNumber(input.category_id),
-          limit: asNumber(input.limit),
-        });
+        const results = await searchProducts(
+          {
+            keyword: asString(input.keyword),
+            minPrice: asNumber(input.min_price),
+            maxPrice: asNumber(input.max_price),
+            categoryId: asNumber(input.category_id),
+            limit: asNumber(input.limit),
+          },
+          ctx.storeHash,
+        );
         if (results.length === 0) return JSON.stringify({ results: [], note: "No matching products." });
         return JSON.stringify({ results });
       }
@@ -126,7 +140,7 @@ export async function runTool(
       case "get_product_details": {
         const id = asNumber(input.product_id);
         if (id === undefined) return errMsg("product_id is required.");
-        const detail = await getProductDetail(id);
+        const detail = await getProductDetail(id, ctx.storeHash);
         if (!detail) return errMsg("No product found with that id.");
         return JSON.stringify(detail);
       }
@@ -137,7 +151,7 @@ export async function runTool(
         if (id === undefined || !email) {
           return errMsg("Both order_id and email are required to look up an order.");
         }
-        const result = await lookupOrder(id, email);
+        const result = await lookupOrder(id, email, ctx.storeHash);
         if (result === "not_found") {
           return JSON.stringify({ found: false, reason: "No order with that number exists." });
         }
@@ -161,12 +175,18 @@ export async function runTool(
         const summary = asString(input.summary) ?? "(no summary)";
         const contactEmail = asString(input.contact_email);
         if (!contactEmail) return errMsg("A contact email is required to escalate.");
-        const result = await escalate({
-          summary,
-          contactEmail,
-          contactName: asString(input.contact_name),
-          transcript: ctx.transcript,
-        });
+        const result = await escalate(
+          {
+            summary,
+            contactEmail,
+            contactName: asString(input.contact_name),
+            transcript: ctx.transcript,
+          },
+          {
+            email: ctx.settings?.escalationEmail || undefined,
+            slackWebhook: ctx.settings?.slackWebhook || undefined,
+          },
+        );
         if (!result.delivered) {
           return JSON.stringify({
             delivered: false,

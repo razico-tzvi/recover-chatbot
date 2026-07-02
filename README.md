@@ -161,6 +161,50 @@ Set the backend's `ALLOWED_ORIGINS` to your storefront domain(s).
 
 ---
 
+## Run as a BigCommerce app (single-click, multi-tenant)
+
+Instead of the manual snippet, the backend can run as a proper **single-click
+app**: merchants click Install, approve OAuth scopes, and the widget is
+auto-injected on their storefront with an in-panel settings screen. One backend
+serves many stores; each store's token + settings live in SQLite.
+
+**1. Register the app** (BigCommerce Dev Portal → My Apps → Create an app):
+- **Auth Callback URL:** `<APP_URL>/auth`
+- **Load Callback URL:** `<APP_URL>/load`
+- **Uninstall Callback URL:** `<APP_URL>/uninstall`
+- **OAuth scopes:** Products (read-only), Orders (read-only), Content/Scripts
+  (modify), Store Information (read-only).
+- Copy the **Client ID** and **Client Secret**.
+
+**2. Configure app mode** in `.env`:
+```
+BC_CLIENT_ID=...
+BC_CLIENT_SECRET=...
+APP_URL=https://your-public-host        # must be public HTTPS
+SESSION_SECRET=<long random>            # signs the admin session cookie
+APP_ENCRYPTION_KEY=<long random>         # encrypts store tokens at rest
+# DATABASE_PATH=./data/app.db           # optional
+```
+When these are set, the server auto-enables app mode: it registers `/auth`,
+`/load`, `/uninstall`, `/api/settings`, and `/api/widget-config`, and serves the
+widget at `<APP_URL>/widget.js`. (Leave them blank to keep single-store/mock
+mode.)
+
+**3. Local testing** — BigCommerce must reach your machine over HTTPS. Run a
+tunnel and point `APP_URL` at it:
+```
+cloudflared tunnel --url http://localhost:3000     # or: ngrok http 3000
+```
+Set the app's callback URLs and `APP_URL` to the tunnel URL, then install the
+draft app on a BigCommerce **dev store**. The widget appears on the storefront
+automatically; open the app in the control panel to edit settings.
+
+**How it works:** on install, `/auth` exchanges the OAuth `code` for the store's
+token (stored encrypted), then calls the Scripts API to inject
+`widget.js?store=<hash>`. The widget sends its `store` hash with every chat
+request; the backend loads that store's token + settings for tool calls and
+escalation. Uninstall deletes the store (BigCommerce auto-removes the script).
+
 ## Security model
 
 - API keys and the BigCommerce token live **only** on the server; the widget
@@ -176,7 +220,18 @@ Set the backend's `ALLOWED_ORIGINS` to your storefront domain(s).
   treat tool/message content as data, not instructions (prompt-injection
   resistance).
 - The widget escapes all assistant text before rendering (no raw HTML), and
-  only linkifies URLs.
+  only linkifies URLs (http(s)/relative only).
+
+**App mode adds:**
+- Store OAuth tokens are **encrypted at rest** (AES-256-GCM, `APP_ENCRYPTION_KEY`)
+  in a `chmod 600` SQLite file; never returned by any endpoint.
+- Load/uninstall callbacks **verify the BigCommerce signed JWT** (HS256 with the
+  client secret) before trusting the store hash (`jwtVerify.ts`, unit-tested).
+- Per-store isolation: each chat resolves **only its own** store's token, so one
+  store can never read another's catalog/orders. Chat requests for a store that
+  isn't installed are rejected (403).
+- The admin settings write is protected by a signed session cookie **and** an
+  Origin check (CSRF guard), since the app renders in a cross-site iframe.
 
 ---
 

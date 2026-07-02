@@ -11,6 +11,7 @@ export async function streamChat(
   sessionId: string,
   messages: ChatMessage[],
   onEvent: (event: StreamEvent) => void,
+  store?: string,
   signal?: AbortSignal,
 ): Promise<void> {
   let res: Response;
@@ -18,7 +19,7 @@ export async function streamChat(
     res = await fetch(`${apiBase}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, messages }),
+      body: JSON.stringify({ sessionId, messages, store: store || undefined }),
       signal,
     });
   } catch {

@@ -1,6 +1,5 @@
 import { config } from "../config.js";
-
-const BASE = `https://api.bigcommerce.com/stores/${config.BC_STORE_HASH}`;
+import { getStoreToken } from "../db/stores.js";
 
 export class BigCommerceError extends Error {
   constructor(
@@ -19,8 +18,22 @@ interface RequestOpts {
   maxRetries?: number;
 }
 
-function buildUrl(path: string, query?: RequestOpts["query"]): string {
-  const url = new URL(BASE + path);
+/**
+ * Resolve the store hash + token for a request. In app mode the token comes
+ * from the per-store record; in single-store/dev mode it falls back to the
+ * BC_STORE_HASH / BC_ACCESS_TOKEN env vars.
+ */
+function resolveStore(storeHash?: string): { hash: string; token: string } {
+  const hash = storeHash ?? config.BC_STORE_HASH;
+  const token = (storeHash ? getStoreToken(storeHash) : null) ?? config.BC_ACCESS_TOKEN;
+  if (!hash || !token) {
+    throw new BigCommerceError("No BigCommerce credentials available for this store.", 401);
+  }
+  return { hash, token };
+}
+
+function buildUrl(hash: string, path: string, query?: RequestOpts["query"]): string {
+  const url = new URL(`https://api.bigcommerce.com/stores/${hash}${path}`);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
       if (v !== undefined) url.searchParams.set(k, String(v));
@@ -30,18 +43,23 @@ function buildUrl(path: string, query?: RequestOpts["query"]): string {
 }
 
 /**
- * Authenticated GET against the BigCommerce Management API with rate-limit
- * backoff. BigCommerce returns 429 with an `X-Rate-Limit-Time-Reset-Ms`
- * header indicating how long to wait before retrying.
+ * Authenticated GET against the BigCommerce Management API for a given store,
+ * with rate-limit backoff. BigCommerce returns 429 with an
+ * `X-Rate-Limit-Time-Reset-Ms` header indicating how long to wait.
  */
-export async function bcGet<T>(path: string, opts: RequestOpts = {}): Promise<T> {
+export async function bcGet<T>(
+  storeHash: string | undefined,
+  path: string,
+  opts: RequestOpts = {},
+): Promise<T> {
   const maxRetries = opts.maxRetries ?? 2;
-  const url = buildUrl(path, opts.query);
+  const { hash, token } = resolveStore(storeHash);
+  const url = buildUrl(hash, path, opts.query);
 
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(url, {
       headers: {
-        "X-Auth-Token": config.BC_ACCESS_TOKEN ?? "",
+        "X-Auth-Token": token,
         Accept: "application/json",
       },
     });

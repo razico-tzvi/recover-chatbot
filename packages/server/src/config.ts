@@ -19,13 +19,24 @@ const schema = z.object({
   OPENAI_MODEL: z.string().optional(),
   OPENAI_API_KEY: z.string().default("not-needed"),
 
-  // BigCommerce (required unless MOCK_BIGCOMMERCE=true)
+  // BigCommerce (required unless MOCK_BIGCOMMERCE=true OR running as an app)
   MOCK_BIGCOMMERCE: z
     .string()
     .default("false")
     .transform((s) => s.toLowerCase() === "true"),
   BC_STORE_HASH: z.string().optional(),
   BC_ACCESS_TOKEN: z.string().optional(),
+
+  // ─── BigCommerce App mode ───────────────────────────────────────────────
+  // Set BC_CLIENT_ID + BC_CLIENT_SECRET + APP_URL to run as a single-click app
+  // (multi-tenant: OAuth install, per-store tokens in SQLite). When unset, the
+  // server runs in single-store/mock mode using BC_STORE_HASH/BC_ACCESS_TOKEN.
+  BC_CLIENT_ID: z.string().optional(),
+  BC_CLIENT_SECRET: z.string().optional(),
+  APP_URL: z.string().url().optional(),
+  SESSION_SECRET: z.string().optional(),
+  APP_ENCRYPTION_KEY: z.string().optional(),
+  DATABASE_PATH: z.string().default("./data/app.db"),
 
   // Server
   PORT: z.coerce.number().int().positive().default(3000),
@@ -67,12 +78,25 @@ const parsed = schema
         message: "OPENAI_BASE_URL and OPENAI_MODEL are required when LLM_PROVIDER=openai",
       });
     }
-    if (!v.MOCK_BIGCOMMERCE && (!v.BC_STORE_HASH || !v.BC_ACCESS_TOKEN)) {
+    const appMode = Boolean(v.BC_CLIENT_ID || v.BC_CLIENT_SECRET || v.APP_URL);
+    if (!v.MOCK_BIGCOMMERCE && !appMode && (!v.BC_STORE_HASH || !v.BC_ACCESS_TOKEN)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["BC_STORE_HASH"],
-        message: "BC_STORE_HASH and BC_ACCESS_TOKEN are required unless MOCK_BIGCOMMERCE=true",
+        message:
+          "BC_STORE_HASH and BC_ACCESS_TOKEN are required unless MOCK_BIGCOMMERCE=true or app mode (BC_CLIENT_ID/BC_CLIENT_SECRET/APP_URL) is configured",
       });
+    }
+    if (appMode) {
+      for (const k of ["BC_CLIENT_ID", "BC_CLIENT_SECRET", "APP_URL", "SESSION_SECRET", "APP_ENCRYPTION_KEY"] as const) {
+        if (!v[k]) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [k],
+            message: `${k} is required in app mode`,
+          });
+        }
+      }
     }
   })
   .safeParse(process.env);
@@ -95,5 +119,10 @@ export const emailEnabled = Boolean(
     config.SMTP_FROM,
 );
 
-/** True when Slack escalation is configured. */
+/** True when Slack escalation is configured (global fallback). */
 export const slackEnabled = Boolean(config.SLACK_WEBHOOK_URL);
+
+/** True when running as a multi-tenant BigCommerce app (OAuth install). */
+export const appModeEnabled = Boolean(
+  config.BC_CLIENT_ID && config.BC_CLIENT_SECRET && config.APP_URL,
+);

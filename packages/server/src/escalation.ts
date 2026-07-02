@@ -1,5 +1,5 @@
 import nodemailer from "nodemailer";
-import { config, emailEnabled, slackEnabled } from "./config.js";
+import { config } from "./config.js";
 import type { ChatMessage } from "@recover/shared";
 
 export interface EscalationInput {
@@ -10,6 +10,12 @@ export interface EscalationInput {
   contactName?: string;
   /** Recent conversation, for context. */
   transcript: ChatMessage[];
+}
+
+/** Per-store overrides for where escalations are delivered. */
+export interface EscalationTargets {
+  email?: string;
+  slackWebhook?: string;
 }
 
 export interface EscalationResult {
@@ -46,7 +52,10 @@ function formatTranscript(transcript: ChatMessage[]): string {
  * Never throws to the caller — returns which channels succeeded so the
  * assistant can tell the shopper truthfully whether they'll be contacted.
  */
-export async function escalate(input: EscalationInput): Promise<EscalationResult> {
+export async function escalate(
+  input: EscalationInput,
+  targets: EscalationTargets = {},
+): Promise<EscalationResult> {
   const channels: string[] = [];
   const transcript = formatTranscript(input.transcript);
   const body =
@@ -55,11 +64,17 @@ export async function escalate(input: EscalationInput): Promise<EscalationResult
     `Summary:\n${input.summary}\n\n` +
     `Recent transcript:\n${transcript}\n`;
 
-  if (emailEnabled) {
+  // Per-store target overrides fall back to global env config. Email still
+  // requires the operator's global SMTP transport; only the recipient varies.
+  const toEmail = targets.email || config.ESCALATION_EMAIL;
+  const slackUrl = targets.slackWebhook || config.SLACK_WEBHOOK_URL;
+  const smtpReady = Boolean(config.SMTP_HOST && config.SMTP_PORT && config.SMTP_FROM);
+
+  if (smtpReady && toEmail) {
     try {
       await getTransporter().sendMail({
         from: config.SMTP_FROM,
-        to: config.ESCALATION_EMAIL,
+        to: toEmail,
         replyTo: input.contactEmail,
         subject: `Chatbot escalation from ${input.contactEmail}`,
         text: body,
@@ -70,9 +85,9 @@ export async function escalate(input: EscalationInput): Promise<EscalationResult
     }
   }
 
-  if (slackEnabled) {
+  if (slackUrl) {
     try {
-      const res = await fetch(config.SLACK_WEBHOOK_URL as string, {
+      const res = await fetch(slackUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: "```" + body + "```" }),

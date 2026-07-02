@@ -2,7 +2,7 @@ import type Anthropic from "@anthropic-ai/sdk";
 import type { ChatMessage, StreamEvent } from "@recover/shared";
 import { anthropic, MODEL } from "./client.js";
 import { buildSystem } from "./systemPrompt.js";
-import { toolDefinitions, runTool, toolStatusLabel, type ToolContext } from "./tools.js";
+import { toolDefinitions, runTool, toolStatusLabel, type ToolContext, type TurnContext } from "./tools.js";
 
 /** Hard cap on tool-use rounds to prevent runaway loops. */
 const MAX_ITERATIONS = 6;
@@ -15,9 +15,10 @@ const MAX_TOKENS = 4096;
 export async function runAnthropicTurn(
   history: ChatMessage[],
   emit: (event: StreamEvent) => void,
+  turn: TurnContext = {},
 ): Promise<void> {
-  const system = await buildSystem();
-  const ctx: ToolContext = { transcript: history };
+  const system = await buildSystem(turn.settings?.systemExtra);
+  const ctx: ToolContext = { transcript: history, storeHash: turn.storeHash, settings: turn.settings };
 
   const messages: Anthropic.MessageParam[] = history.map((m) => ({
     role: m.role,

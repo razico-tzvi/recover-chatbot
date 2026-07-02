@@ -19,10 +19,14 @@ Rules you must always follow:
 
 The store's current policies and FAQ are below; use search_faq to find specific sections, but you may also rely on this text directly for policy questions.`;
 
-/** The full system prompt as plain text (persona + policies). */
-export async function buildSystemText(): Promise<string> {
+/** The full system prompt as plain text (persona + policies + per-store extra). */
+export async function buildSystemText(extra?: string): Promise<string> {
   const policies = await loadPolicies();
-  return `${PERSONA}\n\n--- STORE POLICIES & FAQ ---\n${policies}`;
+  let text = `${PERSONA}\n\n--- STORE POLICIES & FAQ ---\n${policies}`;
+  if (extra && extra.trim()) {
+    text += `\n\n--- STORE-SPECIFIC INSTRUCTIONS ---\n${extra.trim()}`;
+  }
+  return text;
 }
 
 /**
@@ -30,11 +34,11 @@ export async function buildSystemText(): Promise<string> {
  * stable across turns, so we mark the last block with cache_control to get
  * prompt-cache hits on every follow-up message.
  */
-export async function buildSystem(): Promise<Anthropic.TextBlockParam[]> {
+export async function buildSystem(extra?: string): Promise<Anthropic.TextBlockParam[]> {
   return [
     {
       type: "text",
-      text: await buildSystemText(),
+      text: await buildSystemText(extra),
       cache_control: { type: "ephemeral" },
     },
   ];

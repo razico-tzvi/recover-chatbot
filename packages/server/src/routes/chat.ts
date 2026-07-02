@@ -2,10 +2,13 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { LIMITS, type StreamEvent } from "@recover/shared";
 import { runChatTurn } from "../ai/chat.js";
-import { config } from "../config.js";
+import { config, appModeEnabled } from "../config.js";
+import type { TurnContext } from "../ai/tools.js";
 
 const bodySchema = z.object({
   sessionId: z.string().min(1).max(LIMITS.maxSessionIdChars),
+  /** Store hash (app mode). Injected by the widget from its script tag. */
+  store: z.string().max(50).optional(),
   messages: z
     .array(
       z.object({
@@ -24,9 +27,27 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: "Invalid request body." });
     }
 
-    const { messages } = parsed.data;
+    const { messages, store } = parsed.data;
     if (messages[messages.length - 1]?.role !== "user") {
       return reply.code(400).send({ error: "The last message must be from the user." });
+    }
+
+    // Resolve per-store context in app mode (skipped when MOCK_BIGCOMMERCE).
+    let turn: TurnContext = {};
+    if (appModeEnabled && !config.MOCK_BIGCOMMERCE) {
+      if (!store) {
+        return reply.code(400).send({ error: "Missing store." });
+      }
+      const { storeExists } = await import("../db/stores.js");
+      const { getSettings } = await import("../db/settings.js");
+      if (!storeExists(store)) {
+        return reply.code(403).send({ error: "This store isn't installed." });
+      }
+      turn = { storeHash: store, settings: getSettings(store) };
+    } else if (appModeEnabled && store) {
+      // Mock mode but still surface per-store settings if present.
+      const { getSettings } = await import("../db/settings.js");
+      turn = { storeHash: store, settings: getSettings(store) };
     }
 
     // Take over the socket and stream newline-delimited JSON events.
@@ -40,8 +61,11 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
     };
+    // Public storefront widget endpoint: reflect the requesting origin (no
+    // credentials are used, so this is safe). Mirrors the global CORS policy,
+    // which the hijacked response bypasses.
     const origin = request.headers.origin;
-    if (origin && config.ALLOWED_ORIGINS.includes(origin)) {
+    if (origin) {
       headers["Access-Control-Allow-Origin"] = origin;
       headers["Vary"] = "Origin";
     }
@@ -62,7 +86,7 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     };
 
     try {
-      await runChatTurn(messages, write);
+      await runChatTurn(messages, write, turn);
     } catch (err) {
       request.log.error({ err }, "chat turn failed");
       write({ type: "error", message: "Sorry, something went wrong. Please try again." });
