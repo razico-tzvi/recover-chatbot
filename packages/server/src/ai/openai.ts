@@ -4,7 +4,9 @@ import { buildSystemText } from "./systemPrompt.js";
 import { toolDefinitions, runTool, toolStatusLabel, type ToolContext } from "./tools.js";
 
 const MAX_ITERATIONS = 6;
-const MAX_TOKENS = 2048;
+// Generous headroom: reasoning models spend tokens on chain-of-thought
+// (returned separately as reasoning_content) before the answer or tool call.
+const MAX_TOKENS = 4096;
 
 interface OpenAIToolCall {
   id: string;
