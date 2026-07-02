@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { LIMITS, type StreamEvent } from "@recover/shared";
 import { runChatTurn } from "../ai/chat.js";
+import { config } from "../config.js";
 
 const bodySchema = z.object({
   sessionId: z.string().min(1).max(LIMITS.maxSessionIdChars),
@@ -29,13 +30,22 @@ export async function chatRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // Take over the socket and stream newline-delimited JSON events.
+    // NOTE: hijacking bypasses Fastify's onSend hooks — including @fastify/cors
+    // — so we must set the CORS header on the streamed response ourselves, or
+    // the browser blocks the response body from JS even though it arrives.
     reply.hijack();
     const res = reply.raw;
-    res.writeHead(200, {
+    const headers: Record<string, string> = {
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
-    });
+    };
+    const origin = request.headers.origin;
+    if (origin && config.ALLOWED_ORIGINS.includes(origin)) {
+      headers["Access-Control-Allow-Origin"] = origin;
+      headers["Vary"] = "Origin";
+    }
+    res.writeHead(200, headers);
 
     // The client is gone only when the RESPONSE socket closes before we've
     // finished. (Do NOT key off request.raw "close" — that fires as soon as
