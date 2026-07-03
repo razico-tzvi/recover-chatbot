@@ -57,11 +57,12 @@ const route = async ({ request, reply, api, logger, connections }) => {
   });
   const write = (obj) => { try { raw.write(JSON.stringify(obj) + "\n"); } catch (e) {} };
 
+  let assistantText = "";
   try {
     await runChatStream({
       provider, baseUrl, model, apiKey, messages, bc, logger,
       api, sessionId: body.sessionId, storeHash,
-      onDelta: (t) => { if (t) write({ type: "delta", text: t }); },
+      onDelta: (t) => { if (t) { assistantText += t; write({ type: "delta", text: t }); } },
     });
     write({ type: "done" });
   } catch (err) {
@@ -69,6 +70,17 @@ const route = async ({ request, reply, api, logger, connections }) => {
     write({ type: "error" });
   }
   try { raw.end(); } catch (e) {}
+
+  // Persist the turn for the admin conversation view (best-effort; never blocks the reply).
+  try {
+    const lastUser = messages[messages.length - 1] || {};
+    await persistTurn(api, {
+      storeId: store.id, sessionId: body.sessionId, userText: String(lastUser.content || ""),
+      userImages: lastUser.images, assistantText, provider, model,
+    });
+  } catch (err) {
+    logger.error({ err }, "persist turn failed");
+  }
 };
 
 // Cross-origin: the storefront (a different domain) calls this. Gadget's
@@ -245,6 +257,25 @@ function anthropicContent(m) {
     return blocks.length ? blocks : String(m.content ?? "");
   }
   return String(m.content ?? "");
+}
+
+// Store the user message + assistant reply and upsert the session summary,
+// so the app's Conversations view can list sessions and show transcripts.
+async function persistTurn(api, { storeId, sessionId, userText, userImages, assistantText, provider, model }) {
+  if (!sessionId || !storeId) return;
+  const imgs = Array.isArray(userImages) && userImages.length ? userImages : null;
+  if (userText || imgs) {
+    await api.internal.chatMessage.create({ sessionId, storeId, role: "user", content: (userText || "").slice(0, 8000), images: imgs });
+  }
+  if (assistantText) await api.internal.chatMessage.create({ sessionId, storeId, role: "assistant", content: assistantText.slice(0, 8000) });
+
+  const added = ((userText || imgs) ? 1 : 0) + (assistantText ? 1 : 0);
+  const rows = await api.internal.chatSession.findMany({ filter: { sessionId: { equals: sessionId }, storeId: { equals: storeId } }, first: 1 });
+  if (rows[0]) {
+    await api.internal.chatSession.update(rows[0].id, { messageCount: (rows[0].messageCount || 0) + added, provider, model });
+  } else {
+    await api.internal.chatSession.create({ sessionId, storeId, preview: (userText || "(image)").slice(0, 140), messageCount: added, provider, model });
+  }
 }
 
 async function runChatStream(opts) {

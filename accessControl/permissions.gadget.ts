@@ -26,6 +26,26 @@ export const permissions: GadgetPermissions = {
             },
           },
         },
+        chatMessage: {
+          read: {
+            filter: "accessControl/filters/chatMessage.gelly",
+          },
+          actions: {
+            delete: {
+              filter: "accessControl/filters/chatMessage.gelly",
+            },
+          },
+        },
+        chatSession: {
+          read: {
+            filter: "accessControl/filters/chatSession.gelly",
+          },
+          actions: {
+            delete: {
+              filter: "accessControl/filters/chatSession.gelly",
+            },
+          },
+        },
       },
     },
     unauthenticated: {
