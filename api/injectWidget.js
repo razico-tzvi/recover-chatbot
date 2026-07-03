@@ -11,11 +11,22 @@ export async function ensureWidgetScript(connections, storeHash, logger) {
   }
   const bc = await connections.bigcommerce.forStoreHash(storeHash);
   const NAME = "Recover Chatbot Widget";
+  const desiredSrc = appUrl + "/widget?store=" + storeHash;
 
-  // Avoid duplicates across installs/reinstalls.
+  // Reconcile: keep one script pointing at the CURRENT app URL and remove any
+  // stale ones (e.g. a dev-pointing script left over after going live).
   const existing = (await bc.v3.get("/content/scripts", { query: { limit: 250 } }).catch(() => [])) || [];
-  if (existing.some((s) => s.name === NAME)) {
-    logger?.info("widget script already present");
+  let hasCorrect = false;
+  for (const s of existing.filter((x) => x.name === NAME)) {
+    if (s.src === desiredSrc) {
+      hasCorrect = true;
+    } else {
+      await bc.v3.delete(`/content/scripts/${s.uuid}`).catch(() => {});
+      logger?.info("removed stale widget script: " + s.src);
+    }
+  }
+  if (hasCorrect) {
+    logger?.info("widget script already correct");
     return;
   }
 
@@ -28,9 +39,9 @@ export async function ensureWidgetScript(connections, storeHash, logger) {
       location: "footer",
       visibility: "all_pages",
       kind: "src",
-      src: appUrl + "/widget?store=" + storeHash,
+      src: desiredSrc,
       consent_category: "functional",
     },
   });
-  logger?.info("injected widget script for store " + storeHash);
+  logger?.info("injected widget script -> " + desiredSrc);
 }

@@ -26,27 +26,49 @@ const route = async ({ request, reply, api, logger, connections }) => {
   const store = stores[0];
   if (!store) return reply.code(404).send({ error: "Store not installed." });
 
-  const baseUrl = store.llmBaseUrl || process.env.OPENAI_BASE_URL;
+  const provider = (store.llmProvider || process.env.LLM_PROVIDER || "openai").toLowerCase();
   const model = store.llmModel || process.env.OPENAI_MODEL;
-  const apiKey = store.llmApiKey || process.env.OPENAI_API_KEY || "not-needed";
-  if (!baseUrl || !model) {
+  const baseUrl = store.llmBaseUrl || process.env.OPENAI_BASE_URL;
+  const apiKey =
+    store.llmApiKey ||
+    (provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY) ||
+    "not-needed";
+
+  // Anthropic needs model + key (fixed endpoint); OpenAI-compatible needs base URL + model.
+  const configured = provider === "anthropic" ? !!(model && apiKey && apiKey !== "not-needed") : !!(baseUrl && model);
+  if (!configured) {
     return reply.send({
-      text: "The assistant isn't configured yet — please set the LLM provider, base URL and model in the app settings.",
+      text: "The assistant isn't configured yet — please set the LLM provider, model and API key in the app settings.",
     });
   }
 
   const bc = await connections.bigcommerce.forStoreHash(storeHash);
 
+  // Stream the reply as newline-delimited JSON. We hijack the response to write
+  // chunks directly, so CORS headers are set manually here (route.options CORS is
+  // bypassed for hijacked responses; the preflight OPTIONS still uses it).
+  reply.hijack();
+  const raw = reply.raw;
+  raw.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Access-Control-Allow-Origin": request.headers.origin || "*",
+    Vary: "Origin",
+  });
+  const write = (obj) => { try { raw.write(JSON.stringify(obj) + "\n"); } catch (e) {} };
+
   try {
-    const text = await runChat({
-      baseUrl, model, apiKey, messages, bc, logger,
+    await runChatStream({
+      provider, baseUrl, model, apiKey, messages, bc, logger,
       api, sessionId: body.sessionId, storeHash,
+      onDelta: (t) => { if (t) write({ type: "delta", text: t }); },
     });
-    return reply.send({ text });
+    write({ type: "done" });
   } catch (err) {
-    logger.error({ err }, "chat turn failed");
-    return reply.send({ text: "Sorry, something went wrong. Please try again." });
+    logger.error({ err }, "chat stream failed");
+    write({ type: "error" });
   }
+  try { raw.end(); } catch (e) {}
 };
 
 // Cross-origin: the storefront (a different domain) calls this. Gadget's
@@ -192,38 +214,157 @@ const TOOLS = [
   },
 ];
 
-async function runChat({ baseUrl, model, apiKey, messages, bc, logger, api, sessionId, storeHash }) {
-  const convo = [{ role: "system", content: SYSTEM }, ...messages.map((m) => ({ role: m.role, content: m.content }))];
+// ─────────────────── multimodal (image) helpers ───────────────────
+
+function parseDataUrl(u) {
+  const m = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(String(u || ""));
+  return m ? { mediaType: m[1], data: m[2] } : null;
+}
+
+// OpenAI-compatible: images become image_url parts (data URI or http URL).
+function openaiContent(m) {
+  if (m.role === "user" && Array.isArray(m.images) && m.images.length) {
+    const parts = [];
+    if (m.content) parts.push({ type: "text", text: String(m.content) });
+    for (const u of m.images.slice(0, 4)) parts.push({ type: "image_url", image_url: { url: u } });
+    return parts;
+  }
+  return String(m.content ?? "");
+}
+
+// Anthropic: images become image blocks (base64 source, or url source for http).
+function anthropicContent(m) {
+  if (m.role === "user" && Array.isArray(m.images) && m.images.length) {
+    const blocks = [];
+    if (m.content) blocks.push({ type: "text", text: String(m.content) });
+    for (const u of m.images.slice(0, 4)) {
+      const p = parseDataUrl(u);
+      if (p) blocks.push({ type: "image", source: { type: "base64", media_type: p.mediaType, data: p.data } });
+      else if (/^https?:\/\//.test(u)) blocks.push({ type: "image", source: { type: "url", url: u } });
+    }
+    return blocks.length ? blocks : String(m.content ?? "");
+  }
+  return String(m.content ?? "");
+}
+
+async function runChatStream(opts) {
+  const ctx = { bc: opts.bc, logger: opts.logger, api: opts.api, sessionId: opts.sessionId, storeHash: opts.storeHash };
+  if (opts.provider === "anthropic") {
+    return runAnthropicStream({ model: opts.model, apiKey: opts.apiKey, messages: opts.messages, ctx, onDelta: opts.onDelta });
+  }
+  return runOpenAIStream({ baseUrl: opts.baseUrl, model: opts.model, apiKey: opts.apiKey, messages: opts.messages, ctx, onDelta: opts.onDelta });
+}
+
+function safeJson(s) { try { return JSON.parse(s || "{}"); } catch { return {}; } }
+
+// Read a Server-Sent-Events body line by line, passing each `data:` payload to onData.
+async function forEachSSE(res, onData) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (!line || !line.startsWith("data:")) continue;
+      const data = line.slice(5).trim();
+      if (data === "[DONE]") return;
+      onData(data);
+    }
+  }
+}
+
+// OpenAI-compatible streaming tool loop — streams the final answer via onDelta.
+async function runOpenAIStream({ baseUrl, model, apiKey, messages, ctx, onDelta }) {
+  const convo = [{ role: "system", content: SYSTEM }, ...messages.map((m) => ({ role: m.role, content: openaiContent(m) }))];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages: convo, tools: TOOLS, tool_choice: "auto", max_tokens: MAX_TOKENS, stream: false }),
+      body: JSON.stringify({ model, messages: convo, tools: TOOLS, tool_choice: "auto", max_tokens: MAX_TOKENS, stream: true }),
     });
-    if (!res.ok) throw new Error(`LLM ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok || !res.body) throw new Error(`LLM ${res.status}`);
 
-    const data = await res.json();
-    const msg = data.choices?.[0]?.message ?? {};
-    const toolCalls = msg.tool_calls ?? [];
-
-    if (toolCalls.length === 0) {
-      return (msg.content || "").trim() || "I'm not sure how to help with that — would you like to talk to a human?";
-    }
-
-    convo.push({ role: "assistant", content: msg.content ?? "", tool_calls: toolCalls });
-    for (const call of toolCalls) {
-      let input = {};
-      try {
-        input = JSON.parse(call.function?.arguments || "{}");
-      } catch {
-        /* ignore malformed args */
+    let content = "";
+    const toolCalls = [];
+    await forEachSSE(res, (data) => {
+      const json = safeJson(data);
+      const delta = json.choices?.[0]?.delta || {};
+      if (delta.content) { content += delta.content; onDelta(delta.content); }
+      if (delta.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const k = tc.index || 0;
+          toolCalls[k] = toolCalls[k] || { id: "", type: "function", function: { name: "", arguments: "" } };
+          if (tc.id) toolCalls[k].id = tc.id;
+          if (tc.function?.name) toolCalls[k].function.name += tc.function.name;
+          if (tc.function?.arguments) toolCalls[k].function.arguments += tc.function.arguments;
+        }
       }
-      const result = await runTool(call.function?.name, input, { bc, logger, api, sessionId, storeHash });
+    });
+
+    const calls = toolCalls.filter(Boolean);
+    if (calls.length === 0) return; // final answer already streamed
+
+    convo.push({ role: "assistant", content: content || "", tool_calls: calls });
+    for (const call of calls) {
+      const result = await runTool(call.function?.name, safeJson(call.function?.arguments), ctx);
       convo.push({ role: "tool", tool_call_id: call.id, content: result });
     }
   }
-  return "I'm having trouble completing that — let me connect you with a human if you'd like.";
+}
+
+// Anthropic Messages API streaming tool loop.
+async function runAnthropicStream({ model, apiKey, messages, ctx, onDelta }) {
+  const tools = TOOLS.map((t) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
+  const convo = messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: anthropicContent(m) }));
+
+  for (let i = 0; i < MAX_ITERATIONS; i++) {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({ model, max_tokens: MAX_TOKENS, system: SYSTEM, messages: convo, tools, stream: true }),
+    });
+    if (!res.ok || !res.body) throw new Error(`Anthropic ${res.status}`);
+
+    const blocks = [];
+    let stopReason = null;
+    await forEachSSE(res, (data) => {
+      const ev = safeJson(data);
+      if (ev.type === "content_block_start") {
+        const b = ev.content_block || {};
+        blocks[ev.index] = b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, partial: "" } : { type: "text", text: "" };
+      } else if (ev.type === "content_block_delta") {
+        const b = blocks[ev.index];
+        if (!b) return;
+        if (ev.delta?.type === "text_delta") { b.text += ev.delta.text || ""; onDelta(ev.delta.text || ""); }
+        else if (ev.delta?.type === "input_json_delta") { b.partial += ev.delta.partial_json || ""; }
+      } else if (ev.type === "message_delta" && ev.delta?.stop_reason) {
+        stopReason = ev.delta.stop_reason;
+      }
+    });
+
+    if (stopReason === "tool_use") {
+      const assistant = blocks
+        .filter(Boolean)
+        .filter((b) => b.type === "tool_use" || (b.text && b.text.trim()))
+        .map((b) => (b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, input: safeJson(b.partial) } : { type: "text", text: b.text }));
+      convo.push({ role: "assistant", content: assistant });
+      const toolResults = [];
+      for (const b of assistant) {
+        if (b.type !== "tool_use") continue;
+        const result = await runTool(b.name, b.input || {}, ctx);
+        toolResults.push({ type: "tool_result", tool_use_id: b.id, content: result });
+      }
+      convo.push({ role: "user", content: toolResults });
+      continue;
+    }
+    return; // final answer already streamed
+  }
 }
 
 // ─────────────────────────── tools ───────────────────────────

@@ -11,5 +11,9 @@ export const schema: GadgetModel = {
     llmBaseUrl: { type: "string", storageKey: "store-llmBaseUrl" },
     llmModel: { type: "string", storageKey: "store-llmModel" },
     llmProvider: { type: "string", storageKey: "store-llmProvider" },
+    visionEnabled: {
+      type: "boolean",
+      storageKey: "store-visionEnabled",
+    },
   },
 };
