@@ -134,7 +134,7 @@ const TOOLS = [
     type: "function",
     function: {
       name: "search_products",
-      description: "Search the store catalog. Returns matching products with name, price, stock and link.",
+      description: "Search the store catalog by keyword, product line, brand, or category name, with an optional price range. Returns matching products with name, price, stock and link. Use this for ANY product/brand/line/category the shopper names (e.g. 'S-PRO', 'stabilizers'); it also matches category names, so try it before saying something isn't available.",
       parameters: {
         type: "object",
         properties: {
@@ -438,15 +438,8 @@ function inStock(p) {
   return true;
 }
 
-async function searchProducts(bc, input) {
-  const limit = Math.min(Number(input.limit) || 5, 10);
-  const query = { limit, include: "primary_image", is_visible: true };
-  if (input.keyword) query.keyword = String(input.keyword);
-  if (input.min_price != null) query["price:min"] = input.min_price;
-  if (input.max_price != null) query["price:max"] = input.max_price;
-
-  const products = (await bc.v3.get("/catalog/products", { query })) || [];
-  const results = products.map((p) => ({
+function mapProducts(products) {
+  return (products || []).map((p) => ({
     id: p.id,
     name: p.name,
     price: p.price,
@@ -454,7 +447,46 @@ async function searchProducts(bc, input) {
     url: p.custom_url?.url ?? "",
     imageUrl: p.primary_image?.url_standard ?? null,
   }));
-  return JSON.stringify(results.length ? { results } : { results: [], note: "No matching products." });
+}
+
+async function searchProducts(bc, input) {
+  const limit = Math.min(Number(input.limit) || 5, 10);
+  const kw = input.keyword ? String(input.keyword).trim() : "";
+  const priceQ = {};
+  if (input.min_price != null) priceQ["price:min"] = input.min_price;
+  if (input.max_price != null) priceQ["price:max"] = input.max_price;
+
+  const query = { limit, include: "primary_image", is_visible: true, ...priceQ };
+  if (kw) query.keyword = kw;
+  let products = (await bc.v3.get("/catalog/products", { query })) || [];
+
+  // If a keyword found nothing, it may be a product line / category — look up
+  // matching categories and list their products.
+  let matchedCategory = null;
+  if (kw && products.length === 0) {
+    const cats =
+      (await bc.v3.get("/catalog/categories", { query: { keyword: kw, limit: 5 } }).catch(() => [])) ||
+      (await bc.v3.get("/catalog/categories", { query: { "name:like": kw, limit: 5 } }).catch(() => [])) ||
+      [];
+    const ids = cats.map((c) => c.id).filter(Boolean);
+    if (ids.length) {
+      matchedCategory = cats[0]?.name || null;
+      products =
+        (await bc.v3
+          .get("/catalog/products", { query: { "categories:in": ids.join(","), limit, include: "primary_image", is_visible: true, ...priceQ } })
+          .catch(() => [])) || [];
+    }
+  }
+
+  // Still nothing and the keyword had punctuation — retry with it normalized.
+  if (kw && products.length === 0 && /[-_/]/.test(kw)) {
+    const relaxed = kw.replace(/[-_/]+/g, " ").trim();
+    products = (await bc.v3.get("/catalog/products", { query: { ...query, keyword: relaxed } }).catch(() => [])) || [];
+  }
+
+  const results = mapProducts(products);
+  if (!results.length) return JSON.stringify({ results: [], note: "No matching products or categories." });
+  return JSON.stringify(matchedCategory ? { results, matchedCategory } : { results });
 }
 
 async function getProductDetails(bc, input) {
