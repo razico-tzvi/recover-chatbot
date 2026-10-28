@@ -435,9 +435,27 @@ async function runTool(name, input, ctx) {
     }
   } catch (err) {
     logger?.error({ err, tool: name }, "tool failed");
-    return JSON.stringify({ error: "That request failed. Apologize and suggest trying again." });
+    const status = errorStatus(err);
+    // Auth/permission failures won't fix themselves — tell the model not to retry.
+    if (status === 401 || status === 403) {
+      return JSON.stringify({
+        error: "The store connection isn't authorized for this right now. Do NOT retry. Apologize, say this feature is temporarily unavailable, and offer a human handoff.",
+      });
+    }
+    return JSON.stringify({ error: "That request failed. Do not retry the same call more than once; apologize and suggest trying again later." });
   }
 }
+
+// The BigCommerce client throws errors like "ERROR DURING GET /x: 404 - {...}";
+// pull the HTTP status out of them.
+function errorStatus(err) {
+  const s = err?.status ?? err?.response?.status;
+  if (s) return Number(s);
+  const m = /:\s(\d{3})\s-/.exec(String(err?.message || ""));
+  return m ? Number(m[1]) : null;
+}
+
+const isNotFound = (err) => errorStatus(err) === 404;
 
 function inStock(p) {
   if (p.availability && p.availability !== "available") return false;
@@ -499,10 +517,10 @@ async function searchProducts(bc, input, ctx) {
   // matching categories and list their products.
   let matchedCategory = null;
   if (kw && products.length === 0) {
-    const cats =
-      (await bc.v3.get("/catalog/categories", { query: { keyword: kw, limit: 5 } }).catch(() => [])) ||
-      (await bc.v3.get("/catalog/categories", { query: { "name:like": kw, limit: 5 } }).catch(() => [])) ||
-      [];
+    let cats = (await bc.v3.get("/catalog/categories", { query: { keyword: kw, limit: 5 } }).catch(() => [])) || [];
+    if (!cats.length) {
+      cats = (await bc.v3.get("/catalog/categories", { query: { "name:like": kw, limit: 5 } }).catch(() => [])) || [];
+    }
     const ids = cats.map((c) => c.id).filter(Boolean);
     if (ids.length) {
       matchedCategory = cats[0]?.name || null;
@@ -560,9 +578,19 @@ async function findSessionCartRecord(ctx) {
 async function currentCartId(bc, ctx) {
   const rec = await findSessionCartRecord(ctx);
   if (!rec || !rec.cartId) return null;
-  // Carts expire / convert to orders — verify it still exists.
-  const existing = await bc.v3.get(`/carts/${rec.cartId}`).catch(() => null);
+  // Carts expire / convert to orders — verify it still exists. Only a 404 means
+  // "gone"; other failures (auth, outages) propagate so they aren't reported as an empty cart.
+  const existing = await getCart(bc, rec.cartId);
   return existing && existing.id ? rec.cartId : null;
+}
+
+async function getCart(bc, cartId) {
+  try {
+    return await bc.v3.get(`/carts/${cartId}`);
+  } catch (err) {
+    if (isNotFound(err)) return null;
+    throw err;
+  }
 }
 
 async function rememberCart(ctx, cartId) {
@@ -609,7 +637,7 @@ async function addToCart(bc, input, ctx) {
 async function viewCart(bc, ctx) {
   const cartId = await currentCartId(bc, ctx);
   if (!cartId) return JSON.stringify({ empty: true, note: "The shopper's cart is empty." });
-  const cart = await bc.v3.get(`/carts/${cartId}`).catch(() => null);
+  const cart = await getCart(bc, cartId);
   if (!cart || !cart.id) return JSON.stringify({ empty: true, note: "The shopper's cart is empty." });
 
   const li = cart.line_items || {};
@@ -651,7 +679,13 @@ async function lookupOrder(bc, input) {
   const email = String(input.email || "").trim().toLowerCase();
   if (!id || !email) return JSON.stringify({ error: "Both order_id and email are required." });
 
-  const order = await bc.v2.get(`/orders/${id}`);
+  // A missing order comes back as a thrown 404 — treat it as not-found, not a failure.
+  let order = null;
+  try {
+    order = await bc.v2.get(`/orders/${id}`);
+  } catch (err) {
+    if (!isNotFound(err)) throw err;
+  }
   // Identity gate: only reveal the order if the billing email matches.
   const billingEmail = String(order?.billing_address?.email ?? "").trim().toLowerCase();
   if (!order || !order.id || !billingEmail || billingEmail !== email) {
