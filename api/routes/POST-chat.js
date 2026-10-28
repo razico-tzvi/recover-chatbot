@@ -44,6 +44,9 @@ const route = async ({ request, reply, api, logger, connections }) => {
 
   const bc = await connections.bigcommerce.forStoreHash(storeHash);
 
+  // Per-store context: owner-editable system prompt, else the built-in default.
+  const system = (store.systemPrompt && store.systemPrompt.trim()) || DEFAULT_SYSTEM;
+
   // Stream the reply as newline-delimited JSON. We hijack the response to write
   // chunks directly, so CORS headers are set manually here (route.options CORS is
   // bypassed for hijacked responses; the preflight OPTIONS still uses it).
@@ -60,7 +63,7 @@ const route = async ({ request, reply, api, logger, connections }) => {
   let assistantText = "";
   try {
     await runChatStream({
-      provider, baseUrl, model, apiKey, messages, bc, logger,
+      provider, baseUrl, model, apiKey, messages, bc, logger, system,
       api, sessionId: body.sessionId, storeHash,
       onDelta: (t) => { if (t) { assistantText += t; write({ type: "delta", text: t }); } },
     });
@@ -107,7 +110,11 @@ const FAQ = `## Shipping
 ## Payments
 - Major credit cards, PayPal, and Apple Pay. Sales tax calculated at checkout.`;
 
-const SYSTEM = `You are a friendly SALES SUPPORT assistant for an online store, embedded in the storefront chat widget. Your goal is to help shoppers find the right products and feel confident buying — like a knowledgeable, upbeat in-store associate. Be warm, concise, and consultative.
+// The built-in default context, used when a store hasn't set its own system
+// prompt in the admin Settings tab. Store owners can override the whole thing
+// (see web/routes/index.tsx → DEFAULT_SYSTEM_PROMPT, which must be kept in sync
+// with this text so the admin textarea pre-fills with the same default).
+const DEFAULT_SYSTEM = `You are a friendly SALES SUPPORT assistant for an online store, embedded in the storefront chat widget. Your goal is to help shoppers find the right products and feel confident buying — like a knowledgeable, upbeat in-store associate. Be warm, concise, and consultative.
 
 Helping with sales:
 - Understand the shopper's need (use case, budget, preferences), then recommend specific products that fit — use search_products and get_product_details to ground every recommendation.
@@ -281,9 +288,9 @@ async function persistTurn(api, { storeId, sessionId, userText, userImages, assi
 async function runChatStream(opts) {
   const ctx = { bc: opts.bc, logger: opts.logger, api: opts.api, sessionId: opts.sessionId, storeHash: opts.storeHash };
   if (opts.provider === "anthropic") {
-    return runAnthropicStream({ model: opts.model, apiKey: opts.apiKey, messages: opts.messages, ctx, onDelta: opts.onDelta });
+    return runAnthropicStream({ model: opts.model, apiKey: opts.apiKey, messages: opts.messages, system: opts.system, ctx, onDelta: opts.onDelta });
   }
-  return runOpenAIStream({ baseUrl: opts.baseUrl, model: opts.model, apiKey: opts.apiKey, messages: opts.messages, ctx, onDelta: opts.onDelta });
+  return runOpenAIStream({ baseUrl: opts.baseUrl, model: opts.model, apiKey: opts.apiKey, messages: opts.messages, system: opts.system, ctx, onDelta: opts.onDelta });
 }
 
 function safeJson(s) { try { return JSON.parse(s || "{}"); } catch { return {}; } }
@@ -310,8 +317,8 @@ async function forEachSSE(res, onData) {
 }
 
 // OpenAI-compatible streaming tool loop — streams the final answer via onDelta.
-async function runOpenAIStream({ baseUrl, model, apiKey, messages, ctx, onDelta }) {
-  const convo = [{ role: "system", content: SYSTEM }, ...messages.map((m) => ({ role: m.role, content: openaiContent(m) }))];
+async function runOpenAIStream({ baseUrl, model, apiKey, messages, system, ctx, onDelta }) {
+  const convo = [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: openaiContent(m) }))];
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
@@ -350,7 +357,7 @@ async function runOpenAIStream({ baseUrl, model, apiKey, messages, ctx, onDelta 
 }
 
 // Anthropic Messages API streaming tool loop.
-async function runAnthropicStream({ model, apiKey, messages, ctx, onDelta }) {
+async function runAnthropicStream({ model, apiKey, messages, system, ctx, onDelta }) {
   const tools = TOOLS.map((t) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
   const convo = messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: anthropicContent(m) }));
 
@@ -358,7 +365,7 @@ async function runAnthropicStream({ model, apiKey, messages, ctx, onDelta }) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model, max_tokens: MAX_TOKENS, system: SYSTEM, messages: convo, tools, stream: true }),
+      body: JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: convo, tools, stream: true }),
     });
     if (!res.ok || !res.body) throw new Error(`Anthropic ${res.status}`);
 
@@ -405,9 +412,9 @@ async function runTool(name, input, ctx) {
   try {
     switch (name) {
       case "search_products":
-        return await searchProducts(bc, input);
+        return await searchProducts(bc, input, ctx);
       case "get_product_details":
-        return await getProductDetails(bc, input);
+        return await getProductDetails(bc, input, ctx);
       case "add_to_cart":
         return await addToCart(bc, input, ctx);
       case "view_cart":
@@ -438,18 +445,46 @@ function inStock(p) {
   return true;
 }
 
-function mapProducts(products) {
+// BigCommerce's catalog returns custom_url.url as a storefront-relative path
+// (e.g. "/s-pro-stabilizer/"). Turn it into an absolute link on the store's
+// canonical storefront so product links don't resolve against the app domain.
+const storeUrlCache = new Map(); // storeHash -> base url (no trailing slash)
+
+async function storeBaseUrl(ctx) {
+  const key = ctx.storeHash || "";
+  if (storeUrlCache.has(key)) return storeUrlCache.get(key);
+  let base = "";
+  try {
+    const info = await ctx.bc.v2.get("/store");
+    const raw = info?.secure_url || info?.domain || "";
+    if (raw) base = (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).replace(/\/+$/, "");
+  } catch (err) {
+    ctx.logger?.error({ err }, "store info fetch failed");
+  }
+  storeUrlCache.set(key, base);
+  return base;
+}
+
+function absoluteUrl(base, path) {
+  const p = path || "";
+  if (!p) return "";
+  if (/^https?:\/\//i.test(p)) return p; // already absolute
+  if (!base) return p;
+  return base + (p.startsWith("/") ? p : `/${p}`);
+}
+
+function mapProducts(products, base) {
   return (products || []).map((p) => ({
     id: p.id,
     name: p.name,
     price: p.price,
     inStock: inStock(p),
-    url: p.custom_url?.url ?? "",
+    url: absoluteUrl(base, p.custom_url?.url),
     imageUrl: p.primary_image?.url_standard ?? null,
   }));
 }
 
-async function searchProducts(bc, input) {
+async function searchProducts(bc, input, ctx) {
   const limit = Math.min(Number(input.limit) || 5, 10);
   const kw = input.keyword ? String(input.keyword).trim() : "";
   const priceQ = {};
@@ -484,12 +519,12 @@ async function searchProducts(bc, input) {
     products = (await bc.v3.get("/catalog/products", { query: { ...query, keyword: relaxed } }).catch(() => [])) || [];
   }
 
-  const results = mapProducts(products);
+  const results = mapProducts(products, await storeBaseUrl(ctx));
   if (!results.length) return JSON.stringify({ results: [], note: "No matching products or categories." });
   return JSON.stringify(matchedCategory ? { results, matchedCategory } : { results });
 }
 
-async function getProductDetails(bc, input) {
+async function getProductDetails(bc, input, ctx) {
   const id = Number(input.product_id);
   if (!id) return JSON.stringify({ error: "product_id is required." });
   const p = await bc.v3.get(`/catalog/products/${id}`, { query: { include: "primary_image,variants" } });
@@ -499,7 +534,7 @@ async function getProductDetails(bc, input) {
     name: p.name,
     price: p.price,
     inStock: inStock(p),
-    url: p.custom_url?.url ?? "",
+    url: absoluteUrl(await storeBaseUrl(ctx), p.custom_url?.url),
     description: String(p.description ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1200),
     variants: (p.variants ?? []).map((v) => ({
       id: v.id,
