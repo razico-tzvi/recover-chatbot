@@ -372,6 +372,16 @@ function widgetSource() {
     } catch (e) { if (voiceMode) listenVoice(); }
   }
 
+  // What the shopper is looking at, so "does this come in black?" resolves to
+  // the product on screen. Stencil product pages carry the id in the add-to-cart form.
+  function pageContext() {
+    var ctx = { url: location.href, title: document.title };
+    var el = document.querySelector('[data-cart-item-add] input[name="product_id"]') || document.querySelector('input[name="product_id"]');
+    var id = el && parseInt(el.value, 10);
+    if (id) ctx.productId = id;
+    return ctx;
+  }
+
   // ---- send ----
   function send() {
     if (streaming) return;
@@ -415,7 +425,7 @@ function widgetSource() {
     fetch(apiBase + "/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: sessionId(), store: store, storeHash: store, messages: payload })
+      body: JSON.stringify({ sessionId: sessionId(), store: store, storeHash: store, messages: payload, page: pageContext() })
     }).then(function (res) {
       if (!res.ok) return Promise.reject(res);
       if (!res.body || !res.body.getReader) {

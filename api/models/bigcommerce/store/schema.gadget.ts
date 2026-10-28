@@ -7,11 +7,23 @@ export const schema: GadgetModel = {
   type: "gadget/model-schema/v2",
   storageKey: "DataModel-BigCommerce-Store",
   fields: {
+    faq: { type: "string", storageKey: "store-faq" },
+    handoffEmail: {
+      type: "string",
+      storageKey: "store-handoffEmail",
+    },
+    handoffWebhookUrl: {
+      type: "string",
+      storageKey: "store-handoffWebhookUrl",
+    },
     llmApiKey: { type: "string", storageKey: "store-llmApiKey" },
     llmBaseUrl: { type: "string", storageKey: "store-llmBaseUrl" },
     llmModel: { type: "string", storageKey: "store-llmModel" },
     llmProvider: { type: "string", storageKey: "store-llmProvider" },
-    systemPrompt: { type: "string", storageKey: "store-systemPrompt" },
+    systemPrompt: {
+      type: "string",
+      storageKey: "store-systemPrompt",
+    },
     visionEnabled: {
       type: "boolean",
       storageKey: "store-visionEnabled",

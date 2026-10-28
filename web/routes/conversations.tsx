@@ -1,5 +1,5 @@
-import { Box, Button, Flex, Input, Message, Panel, Text } from "@bigcommerce/big-design";
-import { useFindMany } from "@gadgetinc/react";
+import { Badge, Box, Button, Flex, Input, Message, Panel, Text } from "@bigcommerce/big-design";
+import { useAction, useFindMany } from "@gadgetinc/react";
 import { useState } from "react";
 import { api } from "../api";
 
@@ -22,15 +22,24 @@ function SessionList({ onSelect }: { onSelect: (s: any) => void }) {
   });
 
   const query = q.trim().toLowerCase();
+  const [needsHumanOnly, setNeedsHumanOnly] = useState(false);
   const sessions = (data || []).filter(
-    (s: any) => !query || (s.preview || "").toLowerCase().includes(query) || (s.sessionId || "").toLowerCase().includes(query)
+    (s: any) =>
+      (!needsHumanOnly || s.needsHuman) &&
+      (!query || (s.preview || "").toLowerCase().includes(query) || (s.sessionId || "").toLowerCase().includes(query))
   );
+  const waiting = (data || []).filter((s: any) => s.needsHuman).length;
 
   return (
     <Panel header="Conversations" description="Chat sessions from your storefront assistant.">
-      <Box marginBottom="small">
-        <Input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
-      </Box>
+      <Flex marginBottom="small" flexGap="8px" alignItems="center">
+        <Box style={{ flex: 1 }}>
+          <Input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
+        </Box>
+        <Button variant={needsHumanOnly ? "primary" : "secondary"} onClick={() => setNeedsHumanOnly((v) => !v)}>
+          {"Needs human (" + waiting + ")"}
+        </Button>
+      </Flex>
       {fetching && <Text color="secondary60">Loading…</Text>}
       {error && <Message type="error" messages={[{ text: "Couldn't load conversations." }]} />}
       {data && sessions.length === 0 && !fetching && (
@@ -48,9 +57,12 @@ function SessionList({ onSelect }: { onSelect: (s: any) => void }) {
         >
           <Flex justifyContent="space-between" alignItems="center" flexGap="12px">
             <Box style={{ minWidth: 0 }}>
-              <Text bold marginBottom="none" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {s.preview || "(no preview)"}
-              </Text>
+              <Flex flexGap="8px" alignItems="center">
+                {s.needsHuman && <Badge variant="warning" label="Needs human" />}
+                <Text bold marginBottom="none" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {s.preview || "(no preview)"}
+                </Text>
+              </Flex>
               <Text color="secondary60" marginBottom="none">
                 {(s.messageCount ?? 0) + " messages · " + fmtDate(s.updatedAt) + (s.model ? " · " + s.model : "")}
               </Text>
@@ -67,6 +79,8 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [actionErr, setActionErr] = useState(false);
+  const [needsHuman, setNeedsHuman] = useState(!!session.needsHuman);
+  const [{ fetching: resolving }, updateSession] = useAction(api.chatSession.update);
   // @ts-ignore
   const [{ data, fetching, error }] = useFindMany(api.chatMessage, {
     filter: { sessionId: { equals: session.sessionId } },
@@ -86,6 +100,14 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
     } catch (e) {
       setActionErr(true); setBusy(false); setConfirming(false);
     }
+  }
+
+  async function markResolved() {
+    setActionErr(false);
+    // @ts-ignore
+    const result = await updateSession({ id: session.id, needsHuman: false });
+    if (result.error) setActionErr(true);
+    else setNeedsHuman(false);
   }
 
   function exportCsv() {
@@ -120,6 +142,23 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
       </Flex>
 
       {actionErr && <Message type="error" messages={[{ text: "Action failed. Please try again." }]} marginVertical="small" />}
+      {needsHuman && (
+        <Box border="box" borderRadius="normal" padding="small" marginBottom="small" backgroundColor="warning10">
+          <Flex justifyContent="space-between" alignItems="flex-start" flexGap="12px" flexWrap="wrap">
+            <Box style={{ minWidth: 0 }}>
+              <Text bold marginBottom="xxSmall">
+                {"Handoff requested " + fmtDate(session.handoffAt)}
+              </Text>
+              <Text marginBottom="xxSmall">
+                {"Reply to: "}
+                <a href={"mailto:" + session.handoffEmail}>{session.handoffEmail}</a>
+              </Text>
+              <Text marginBottom="none" style={{ whiteSpace: "pre-wrap" }}>{session.handoffSummary}</Text>
+            </Box>
+            <Button variant="secondary" onClick={markResolved} isLoading={resolving}>Mark resolved</Button>
+          </Flex>
+        </Box>
+      )}
       {fetching && <Text color="secondary60">Loading…</Text>}
       {error && <Message type="error" messages={[{ text: "Couldn't load this conversation." }]} />}
 
