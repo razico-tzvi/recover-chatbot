@@ -78,6 +78,8 @@ setup (ggt dev + `stencil start` + the script tag in
   (`DEFAULT_SYSTEM_PROMPT`) **must be kept in sync** with `DEFAULT_SYSTEM`.
   The store FAQ is a separate `faq` store field appended by `buildSystem`;
   `DEFAULT_FAQ` exists in both files and must also stay in sync.
+- Tools, handoff, stock alerts, required OAuth scopes and test status are
+  documented in `docs/CHATBOT-TOOLS.md` — keep it updated when tools change.
 - `api/actions/sendStockAlerts.ts` — scheduled (every 30 min); emails
   `stockAlert` rows created by the `notify_back_in_stock` tool.
 - `api/routes/GET-widget.js` — serves the widget; `?api=` and `?store=` query
