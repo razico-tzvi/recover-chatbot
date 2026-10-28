@@ -41,8 +41,9 @@ function widgetSource() {
   var apiBase, store;
   try {
     var u = new URL(src, location.href);
-    // API always targets production; override with ?api= on the script src for testing.
-    apiBase = u.searchParams.get("api") || "https://recover-ai-chat.gadget.app";
+    // API targets the environment that served this script (dev or production);
+    // override with ?api= on the script src for testing.
+    apiBase = u.searchParams.get("api") || u.origin;
     store = u.searchParams.get("store") || "";
   } catch (e) {
     return;
@@ -80,12 +81,13 @@ function widgetSource() {
   function renderText(text) {
     var s = String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     var links = [];
-    function stash(label, url) { return " " + (links.push('<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + label + "</a>") - 1) + " "; }
+    // Placeholders use \u0000 so plain numbers in the reply (e.g. "9mm & 357") aren't mistaken for link indexes.
+    function stash(label, url) { return "\u0000" + (links.push('<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + label + "</a>") - 1) + "\u0000"; }
     s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (m, label, url) { return /^(https?:\/\/|\/)/.test(url) ? stash(label, url) : m; });
     s = s.replace(/(https?:\/\/[^\s<]+)/g, function (url) { return stash(url, url); });
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     s = s.replace(/^\s*[*-]\s+/gm, "• ");
-    s = s.replace(/ (\d+) /g, function (_, i) { return links[Number(i)]; });
+    s = s.replace(/\u0000(\d+)\u0000/g, function (_, i) { return links[Number(i)]; });
     return s.replace(/\n/g, "<br>");
   }
   function plain(text) {
