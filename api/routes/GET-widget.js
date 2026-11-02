@@ -1,4 +1,5 @@
 import { RouteHandler } from "gadget-server";
+import { resolveBranding, resolveFeatures } from "../lib/defaults";
 
 /**
  * GET /widget — serves the self-contained storefront chat widget as JavaScript.
@@ -13,8 +14,8 @@ const route = async ({ request, reply, api }) => {
   reply.header("Cache-Control", "public, max-age=300");
   reply.header("Access-Control-Allow-Origin", "*");
 
-  // Look up per-store config to feature-gate the widget (e.g. image uploads).
-  let vision = false;
+  // Per-store branding (admin General tab) and feature gates (image uploads).
+  let store = null;
   const storeHash = request.query?.store;
   if (storeHash) {
     try {
@@ -22,13 +23,23 @@ const route = async ({ request, reply, api }) => {
         filter: { storeHash: { equals: storeHash } },
         first: 1,
       });
-      vision = !!rows[0]?.visionEnabled;
+      store = rows[0] || null;
     } catch (e) {
-      /* default to no vision on lookup failure */
+      /* fall back to default branding and no vision */
     }
   }
 
-  const config = JSON.stringify({ vision });
+  const branding = store ? resolveBranding(store) : null;
+  const config = JSON.stringify({
+    vision: !!store && resolveFeatures(store).vision,
+    ...(branding && {
+      title: branding.botName,
+      color: branding.widgetColor,
+      greeting: branding.greeting,
+      suggestions: branding.suggestedQuestions,
+      disclaimer: branding.disclaimer,
+    }),
+  }).replace(/</g, "\\u003c");
   return reply.send("var RC_CONFIG=" + config + ";(" + widgetSource.toString() + ")();");
 };
 
@@ -50,17 +61,20 @@ function widgetSource() {
   }
   if (!store) return;
 
-  // ---- config (script data-attributes override defaults) ----
-  var color = script.getAttribute("data-color") || "#ef6526";
-  var title = script.getAttribute("data-title") || "Recover AI";
-  var greeting = script.getAttribute("data-greeting") || "Have questions? Get answers now.";
+  // ---- config: the store's admin settings (RC_CONFIG); script data-attributes
+  // only fill in when the store has no config (e.g. a local test page) ----
+  var CFG = (typeof RC_CONFIG !== "undefined" && RC_CONFIG) || {};
+  var color = CFG.color || script.getAttribute("data-color") || "#ef6526";
+  var title = CFG.title || script.getAttribute("data-title") || "Recover AI";
+  var greeting = CFG.greeting || script.getAttribute("data-greeting") || "Have questions? Get answers now.";
   var SUGGESTIONS = ["What are your best-sellers?", "Help me find the right product", "What's your return & shipping policy?"];
   try { var sa = script.getAttribute("data-suggestions"); if (sa) SUGGESTIONS = JSON.parse(sa); } catch (e) {}
-  var DISCLAIMER = script.getAttribute("data-disclaimer") ||
+  if (Array.isArray(CFG.suggestions)) SUGGESTIONS = CFG.suggestions;
+  var DISCLAIMER = CFG.disclaimer || script.getAttribute("data-disclaimer") ||
     "This is an AI assistant trained to answer questions about our products. If you need a human, just ask and we'll connect you with support.";
 
   // ---- capabilities ----
-  var VISION = (typeof RC_CONFIG !== "undefined" && RC_CONFIG && RC_CONFIG.vision) || false;
+  var VISION = !!CFG.vision;
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   var synth = window.speechSynthesis || null;
 

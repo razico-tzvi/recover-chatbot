@@ -2,6 +2,14 @@ import { Badge, Box, Button, Flex, Input, Message, Panel, Text } from "@bigcomme
 import { useAction, useFindMany } from "@gadgetinc/react";
 import { useState } from "react";
 import { api } from "../api";
+import { exportConversations } from "../lib/exports";
+
+type Filter = "all" | "needsHuman" | "flagged";
+const FILTERS: { id: Filter; label: string; match: (s: any) => boolean; where?: Record<string, unknown> }[] = [
+  { id: "all", label: "All", match: () => true },
+  { id: "needsHuman", label: "Needs human", match: (s) => !!s.needsHuman, where: { needsHuman: { equals: true } } },
+  { id: "flagged", label: "Flagged", match: (s) => !!s.flagged, where: { flagged: { equals: true } } },
+];
 
 export const ConversationsPage = () => {
   const [selected, setSelected] = useState<any>(null);
@@ -22,24 +30,37 @@ function SessionList({ onSelect }: { onSelect: (s: any) => void }) {
   });
 
   const query = q.trim().toLowerCase();
-  const [needsHumanOnly, setNeedsHumanOnly] = useState(false);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [exporting, setExporting] = useState<string | null>(null);
+  const [exportErr, setExportErr] = useState(false);
+  const active = FILTERS.find((f) => f.id === filter)!;
   const sessions = (data || []).filter(
     (s: any) =>
-      (!needsHumanOnly || s.needsHuman) &&
+      active.match(s) &&
       (!query || (s.preview || "").toLowerCase().includes(query) || (s.sessionId || "").toLowerCase().includes(query))
   );
-  const waiting = (data || []).filter((s: any) => s.needsHuman).length;
+
+  async function runExport(format: "csv" | "json") {
+    setExporting(format); setExportErr(false);
+    try { await exportConversations(format, active.where); } catch (e) { setExportErr(true); }
+    setExporting(null);
+  }
 
   return (
     <Panel header="Conversations" description="Chat sessions from your storefront assistant.">
-      <Flex marginBottom="small" flexGap="8px" alignItems="center">
-        <Box style={{ flex: 1 }}>
+      <Flex marginBottom="small" flexGap="8px" alignItems="center" flexWrap="wrap">
+        <Box style={{ flex: 1, minWidth: 200 }}>
           <Input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
         </Box>
-        <Button variant={needsHumanOnly ? "primary" : "secondary"} onClick={() => setNeedsHumanOnly((v) => !v)}>
-          {"Needs human (" + waiting + ")"}
-        </Button>
+        {FILTERS.map((f) => (
+          <Button key={f.id} variant={filter === f.id ? "primary" : "secondary"} onClick={() => setFilter(f.id)}>
+            {`${f.label} (${(data || []).filter(f.match).length})`}
+          </Button>
+        ))}
+        <Button variant="subtle" isLoading={exporting === "csv"} onClick={() => runExport("csv")}>Export CSV</Button>
+        <Button variant="subtle" isLoading={exporting === "json"} onClick={() => runExport("json")}>Export JSON</Button>
       </Flex>
+      {exportErr && <Message type="error" messages={[{ text: "Export failed. Please try again." }]} marginBottom="small" />}
       {fetching && <Text color="secondary60">Loading…</Text>}
       {error && <Message type="error" messages={[{ text: "Couldn't load conversations." }]} />}
       {data && sessions.length === 0 && !fetching && (
@@ -59,6 +80,7 @@ function SessionList({ onSelect }: { onSelect: (s: any) => void }) {
             <Box style={{ minWidth: 0 }}>
               <Flex flexGap="8px" alignItems="center">
                 {s.needsHuman && <Badge variant="warning" label="Needs human" />}
+                {s.flagged && <Badge variant="danger" label="Flagged" />}
                 <Text bold marginBottom="none" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {s.preview || "(no preview)"}
                 </Text>
@@ -85,7 +107,7 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
   const [{ data, fetching, error }] = useFindMany(api.chatMessage, {
     filter: { sessionId: { equals: session.sessionId } },
     sort: { createdAt: "Ascending" },
-    first: 500,
+    first: 250, // Gadget's max page size
   });
 
   async function handleDelete() {
@@ -111,8 +133,8 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
   }
 
   function exportCsv() {
-    const rows = [["role", "content", "time"]].concat(
-      (data || []).map((m: any) => [m.role, m.content || "", fmtDate(m.createdAt)])
+    const rows = [["role", "content", "time", "tools"]].concat(
+      (data || []).map((m: any) => [m.role, m.content || "", fmtDate(m.createdAt), Array.isArray(m.tools) ? m.tools.join("|") : ""])
     );
     const csv = rows.map((r) => r.map((c) => '"' + String(c).replace(/"/g, '""') + '"').join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
@@ -134,7 +156,7 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
             <Button actionType="destructive" variant="subtle" onClick={() => setConfirming(true)}>Delete</Button>
           ) : (
             <>
-              <Button actionType="destructive" onClick={handleDelete} isLoading={busy}>Confirm delete</Button>
+              <Button variant="primary" actionType="destructive" onClick={handleDelete} isLoading={busy}>Confirm delete</Button>
               <Button variant="subtle" onClick={() => setConfirming(false)} disabled={busy}>Cancel</Button>
             </>
           )}
@@ -159,6 +181,14 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
           </Flex>
         </Box>
       )}
+      {session.flagged && (
+        <Message
+          type="warning"
+          header={"Flagged " + fmtDate(session.flaggedAt)}
+          messages={[{ text: session.flagReason || "Flagged by a safeguard." }]}
+          marginBottom="small"
+        />
+      )}
       {fetching && <Text color="secondary60">Loading…</Text>}
       {error && <Message type="error" messages={[{ text: "Couldn't load this conversation." }]} />}
 
@@ -177,7 +207,7 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
                 wordBreak: "break-word",
               }}
             >
-              {m.content ? <Text marginBottom="none" style={{ color: "inherit" }}>{m.content}</Text> : null}
+              {m.content?.trim() ? <Text marginBottom="none" style={{ color: "inherit" }}>{m.content.trim()}</Text> : null}
               {Array.isArray(m.images) && m.images.length > 0 && (
                 <Flex flexWrap="wrap" flexGap="6px" style={{ marginTop: m.content ? 6 : 0 }}>
                   {m.images.map((src: string, i: number) => (
@@ -186,7 +216,9 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
                 </Flex>
               )}
             </Box>
-            <Text color="secondary60" marginBottom="none" style={{ fontSize: 11, marginTop: 2 }}>{fmtDate(m.createdAt)}</Text>
+            <Text color="secondary60" marginBottom="none" style={{ fontSize: 11, marginTop: 2 }}>
+              {fmtDate(m.createdAt) + (Array.isArray(m.tools) && m.tools.length ? " · tools: " + m.tools.join(", ") : "")}
+            </Text>
           </Flex>
         );
       })}

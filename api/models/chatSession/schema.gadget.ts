@@ -7,6 +7,17 @@ export const schema: GadgetModel = {
   type: "gadget/model-schema/v2",
   storageKey: "0ZfmLTW_J4KS",
   fields: {
+    flagReason: { type: "string", storageKey: "sess-flagReason" },
+    flagged: {
+      type: "boolean",
+      default: false,
+      storageKey: "sess-flagged",
+    },
+    flaggedAt: {
+      type: "dateTime",
+      includeTime: true,
+      storageKey: "sess-flaggedAt",
+    },
     handoffAt: {
       type: "dateTime",
       includeTime: true,
