@@ -1,31 +1,29 @@
-import { Badge, Box, Button, Flex, FormGroup, Message, Panel, Table, Text, Textarea } from "@bigcommerce/big-design";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { api } from "../api";
 import { GUARDRAILS } from "../../api/lib/defaults";
 import { freshdeskConnected } from "../../api/lib/integrations";
 import { CONTEXT_DEFAULTS, useSettings, type ContextKey } from "../lib/settings";
 import { download, downloadRows, stamp, textBlockRows } from "../lib/download";
 import { exportConversations } from "../lib/exports";
+import { Alert, Btn, Card, Loading, Tag } from "../components/ui";
 
 type Source = {
-  n: number;
-  id: string; // not "key": big-design Table spreads rows as props, and React strips "key"
+  id: string;
   name: string;
   kind: string;
-  updates: string;
   field?: ContextKey;
   note?: string;
 };
 
 const SOURCES: Source[] = [
-  { n: 1, id: "guidelines", name: "General guidelines (system prompt)", kind: "Editable text", updates: "Immediate", field: "systemPrompt" },
-  { n: 2, id: "faq", name: "Store FAQ & policies", kind: "Editable text, ## heading per topic", updates: "Immediate", field: "faq" },
-  { n: 3, id: "catalog", name: "Product catalog", kind: "BigCommerce, read live by the bot's tools", updates: "Live" },
-  { n: 4, id: "freshdesk", name: "Freshdesk ticket history", kind: "Sync, agent replies only", updates: "Nightly" },
-  { n: 5, id: "playbook", name: "Sales playbook", kind: "Versioned, written by the learning loop", updates: "On approved version" },
-  { n: 6, id: "incentive", name: "Incentive instructions", kind: "Editable text", updates: "Immediate", field: "incentiveInstructions", note: "Used once the closing incentive is turned on." },
-  { n: 7, id: "safeguards", name: "Safeguards instructions", kind: "Editable text (wording of refusals only)", updates: "Immediate", field: "safeguardsInstructions" },
-  { n: 8, id: "voice", name: "Voice & tone", kind: "Editable text", updates: "Immediate", field: "voiceTone" },
+  { id: "guidelines", name: "General guidelines", kind: "System prompt", field: "systemPrompt" },
+  { id: "faq", name: "Store FAQ & policies", kind: "One ## heading per topic", field: "faq" },
+  { id: "catalog", name: "Product catalog", kind: "BigCommerce, read live by the bot's tools" },
+  { id: "freshdesk", name: "Freshdesk ticket history", kind: "Nightly sync, agent replies only" },
+  { id: "playbook", name: "Sales playbook", kind: "Versioned, written by the learning loop" },
+  { id: "incentive", name: "Incentive instructions", kind: "Objection handling and tone", field: "incentiveInstructions", note: "Used once the closing incentive is turned on" },
+  { id: "safeguards", name: "Safeguards instructions", kind: "Refusal wording only", field: "safeguardsInstructions" },
+  { id: "voice", name: "Voice & tone", kind: "How the bot sounds", field: "voiceTone" },
 ];
 
 const savedBlock = (store: any, k: ContextKey) => (store?.[k]?.trim() ? store[k] : CONTEXT_DEFAULTS[k]);
@@ -50,7 +48,7 @@ export const ContextPage = () => {
   };
   useEffect(() => { loadCatalogCount(); }, []);
 
-  if (loading || !draft) return <Panel><Text color="secondary60">Loading…</Text></Panel>;
+  if (loading || !draft) return <Loading />;
 
   const run = async (label: string, fn: () => Promise<void>) => {
     setBusy(label);
@@ -99,116 +97,108 @@ export const ContextPage = () => {
   const status = (s: Source) => {
     if (s.field) {
       const custom = draft[s.field].trim() !== CONTEXT_DEFAULTS[s.field].trim();
-      return <Badge variant={custom ? "success" : "secondary"} label={custom ? "Active · customized" : "Active · default"} />;
+      return <Tag tone="good">{custom ? "Active · customized" : "Active · default"}</Tag>;
     }
-    if (s.id === "catalog") return catalog.error ? <Badge variant="danger" label="Error" /> : <Badge variant="success" label="Active" />;
-    if (s.id === "freshdesk") return <Badge variant="secondary" label={freshdeskConnected(store) ? "Sync not built yet" : "Not connected"} />;
-    return <Badge variant="secondary" label="Not started" />;
+    if (s.id === "catalog") return catalog.error ? <Tag tone="crit">Error</Tag> : <Tag tone="good">Live</Tag>;
+    if (s.id === "freshdesk") return <Tag>{freshdeskConnected(store) ? "Sync not built yet" : "Not connected"}</Tag>;
+    return <Tag>Not started</Tag>;
   };
 
-  const items = (s: Source) => {
-    if (s.id === "faq") return `${draft.faq.split(/\n(?=## )/).filter((x) => x.trim()).length} topics`;
-    if (s.field) return `${draft[s.field].length.toLocaleString()} chars`;
-    if (s.id === "catalog") return catalog.loading ? "Counting…" : catalog.count != null ? `${catalog.count.toLocaleString()} products` : "—";
-    return "—";
+  const meta = (s: Source) => {
+    const parts = [s.kind];
+    if (s.id === "faq") parts.push(`${draft.faq.split(/\n(?=## )/).filter((x) => x.trim()).length} topics`);
+    else if (s.field) parts.push(`${draft[s.field].length.toLocaleString()} chars`);
+    if (s.field && store?.updatedAt) parts.push(`saved ${new Date(store.updatedAt).toLocaleDateString()}`);
+    if (s.id === "catalog") {
+      if (catalog.loading) parts.push("counting…");
+      else if (catalog.count != null) parts.push(`${catalog.count.toLocaleString()} products`);
+      if (catalog.fetchedAt) parts.push(`counted ${new Date(catalog.fetchedAt).toLocaleTimeString()}`);
+    }
+    if (s.note) parts.push(s.note);
+    return parts.join(" · ");
   };
 
-  const updated = (s: Source) => {
-    if (s.field) return store?.updatedAt ? new Date(store.updatedAt).toLocaleDateString() : "—";
-    if (s.id === "catalog" && catalog.fetchedAt) return "Live · counted " + new Date(catalog.fetchedAt).toLocaleTimeString();
-    return "—";
-  };
+  const exportBtns = (s: Source) => (
+    <>
+      <Btn small loading={busy === `${s.id}-csv`} onClick={() => exportSource(s, "csv")}>CSV</Btn>
+      <Btn small loading={busy === `${s.id}-json`} onClick={() => exportSource(s, "json")}>JSON</Btn>
+    </>
+  );
 
   const actions = (s: Source) => {
-    const exportBtns = (
-      <>
-        <Button variant="subtle" isLoading={busy === `${s.id}-csv`} onClick={() => exportSource(s, "csv")}>CSV</Button>
-        <Button variant="subtle" isLoading={busy === `${s.id}-json`} onClick={() => exportSource(s, "json")}>JSON</Button>
-      </>
-    );
     if (s.field) {
       return (
-        <Flex flexGap="4px" flexWrap="wrap">
-          <Button variant="secondary" onClick={() => setEditing(editing === s.field ? null : s.field!)}>
-            {editing === s.field ? "Close" : "Edit"}
-          </Button>
-          {exportBtns}
-        </Flex>
+        <>
+          <Btn small onClick={() => setEditing(editing === s.field ? null : s.field!)}>{editing === s.field ? "Close" : "Edit"}</Btn>
+          {exportBtns(s)}
+        </>
       );
     }
     if (s.id === "catalog") {
       return (
-        <Flex flexGap="4px" flexWrap="wrap">
-          <Button variant="secondary" isLoading={catalog.loading} onClick={loadCatalogCount}>Refresh</Button>
-          {exportBtns}
-        </Flex>
+        <>
+          <Btn small loading={catalog.loading} onClick={loadCatalogCount}>Refresh</Btn>
+          {exportBtns(s)}
+        </>
       );
     }
-    return <Text color="secondary60" marginBottom="none">{s.id === "freshdesk" ? "Coming with the Freshdesk integration" : "Coming with the learning loop"}</Text>;
+    return <span className="hint">{s.id === "freshdesk" ? "Coming with the Freshdesk integration" : "Coming with the learning loop"}</span>;
   };
-
-  const editingSource = SOURCES.find((s) => s.field === editing);
 
   return (
     <>
-      <Panel
-        header="Context sources"
-        description="Everything the bot knows about your store. Edits take effect after you save."
-        action={{ text: "Export all", variant: "secondary", isLoading: busy === "all", onClick: exportAll }}
+      <Card
+        title="Context sources"
+        sub="Everything the bot knows about your store. Each source exports on its own; Export all bundles the eight. Edits take effect after you save."
+        action={<Btn loading={busy === "all"} onClick={exportAll}>Export all</Btn>}
       >
-        {exportError && <Message type="error" messages={[{ text: exportError }]} marginBottom="small" />}
-        {catalog.error && <Message type="warning" messages={[{ text: catalog.error }]} marginBottom="small" />}
-        <Table
-          columns={[
-            { header: "#", hash: "n", render: (s: Source) => s.n },
-            { header: "Source", hash: "name", render: (s: Source) => (
-              <Box>
-                <Text bold marginBottom="none">{s.name}</Text>
-                <Text color="secondary60" marginBottom="none">{s.kind}{s.note ? ` · ${s.note}` : ""}</Text>
-              </Box>
-            ) },
-            { header: "Status", hash: "status", render: status },
-            { header: "Items", hash: "items", render: items },
-            { header: "Updated", hash: "updated", render: updated },
-            { header: "", hash: "actions", render: actions },
-          ]}
-          items={SOURCES}
-          stickyHeader
-        />
-        {editingSource && editing && (
-          <Box marginTop="medium" className="wide-field tall-field">
-            <FormGroup>
-              <Textarea
-                label={editingSource.name}
-                description={editing === "faq" ? "Start each topic with a '## Heading' line." : "Saved with the other settings (Save settings, top right)."}
-                rows={7}
-                value={draft[editing]}
-                onChange={(e) => set(editing, e.target.value)}
-              />
-            </FormGroup>
-            <Button variant="subtle" onClick={() => set(editing, CONTEXT_DEFAULTS[editing])}>Reset to default</Button>
-          </Box>
-        )}
-        <Box marginTop="medium">
-          <Button variant="subtle" onClick={() => setShowGuardrails((v) => !v)}>
+        {exportError && <Alert tone="crit">{exportError}</Alert>}
+        {catalog.error && <Alert tone="warn">{catalog.error}</Alert>}
+        {SOURCES.map((s, i) => (
+          <Fragment key={s.id}>
+            <div className={i === 0 ? "srcrow first" : "srcrow"}>
+              <div className="grow"><b>{s.name}</b><div className="meta">{meta(s)}</div></div>
+              {status(s)}
+              {actions(s)}
+            </div>
+            {s.field && editing === s.field && (
+              <div className="editor">
+                <textarea
+                  className="tall"
+                  aria-label={s.name}
+                  value={draft[s.field]}
+                  onChange={(e) => set(s.field!, e.target.value)}
+                />
+                <div className="row" style={{ marginTop: 6 }}>
+                  <span className="hint">
+                    {s.field === "faq" ? "Start each topic with a '## Heading' line. " : ""}Saved with the other settings (Save settings, top right).
+                  </span>
+                  <div className="spacer" />
+                  <Btn small onClick={() => set(s.field!, CONTEXT_DEFAULTS[s.field!])}>Reset to default</Btn>
+                </div>
+              </div>
+            )}
+          </Fragment>
+        ))}
+        <div style={{ marginTop: 12 }}>
+          <button type="button" className="btn link" onClick={() => setShowGuardrails((v) => !v)}>
             {showGuardrails ? "Hide built-in guardrails" : "Show built-in guardrails (always applied, not editable)"}
-          </Button>
-          {showGuardrails && (
-            <Box padding="small" backgroundColor="secondary10" borderRadius="normal" marginTop="xSmall">
-              <Text marginBottom="none" style={{ whiteSpace: "pre-wrap" }}>{GUARDRAILS}</Text>
-            </Box>
-          )}
-        </Box>
-      </Panel>
+          </button>
+          {showGuardrails && <div className="codebox mono" style={{ marginTop: 8 }}>{GUARDRAILS}</div>}
+        </div>
+      </Card>
 
-      <Panel header="Data exports" description="Full conversation transcripts with message metadata (tools called, flags).">
-        <Flex flexGap="8px" flexWrap="wrap" alignItems="center">
-          <Text marginBottom="none">Conversations</Text>
-          <Button variant="secondary" isLoading={busy === "conv-csv"} onClick={() => run("conv-csv", () => exportConversations("csv"))}>CSV</Button>
-          <Button variant="secondary" isLoading={busy === "conv-json"} onClick={() => run("conv-json", () => exportConversations("json"))}>JSON</Button>
-        </Flex>
-        <Text color="secondary60" marginTop="small">Freshdesk feedback exports arrive with the Freshdesk integration.</Text>
-      </Panel>
+      <Card title="Data exports" sub="CSV or JSON.">
+        <div className="srcrow first">
+          <div className="grow"><b>Conversations</b><div className="meta">Full transcripts with per-message metadata: tools called, flags</div></div>
+          <Btn small loading={busy === "conv-csv"} onClick={() => run("conv-csv", () => exportConversations("csv"))}>CSV</Btn>
+          <Btn small loading={busy === "conv-json"} onClick={() => run("conv-json", () => exportConversations("json"))}>JSON</Btn>
+        </div>
+        <div className="srcrow">
+          <div className="grow"><b>Freshdesk feedback</b><div className="meta">Draft vs sent diffs from the learning phase</div></div>
+          <span className="hint">Arrives with the Freshdesk integration</span>
+        </div>
+      </Card>
     </>
   );
 };

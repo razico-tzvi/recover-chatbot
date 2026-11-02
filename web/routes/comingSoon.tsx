@@ -1,4 +1,4 @@
-import { Panel, Text } from "@bigcommerce/big-design";
+import { Card, Tag } from "../components/ui";
 
 // Tabs whose features ship in later phases of the Admin v2 build.
 const COPY: Record<string, { header: string; body: string }> = {
@@ -23,8 +23,8 @@ const COPY: Record<string, { header: string; body: string }> = {
 export const ComingSoonPage = ({ tab }: { tab: string }) => {
   const c = COPY[tab];
   return (
-    <Panel header={c.header}>
-      <Text>{c.body}</Text>
-    </Panel>
+    <Card title={<span className="row">{c.header} <Tag tone="info">Coming soon</Tag></span>}>
+      <p className="hint" style={{ marginTop: 6 }}>{c.body}</p>
+    </Card>
   );
 };

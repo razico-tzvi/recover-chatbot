@@ -1,4 +1,3 @@
-import { Box, Button, Flex, Link, Message, Panel, ProgressCircle, Tabs, Text } from "@bigcommerce/big-design"
 import { Provider as GadgetProvider, useGadget } from "@gadgetinc/react-bigcommerce";
 import {
   Outlet,
@@ -18,6 +17,7 @@ import { FeaturesPage } from "../routes/features";
 import { ConversationsPage } from "../routes/conversations";
 import { ComingSoonPage } from "../routes/comingSoon";
 import { freshdeskHost } from "../../api/lib/integrations";
+import { Alert, Btn } from "./ui";
 
 // The admin's nine tabs. Settings tabs share one draft with a single Save.
 const TABS = [
@@ -64,67 +64,51 @@ function Layout() {
 function AuthenticatedApp() {
   const { isAuthenticated, loading } = useGadget();
 
-  if (loading) {
-    return (
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-          height: "100%",
-          width: "100%",
-        }}
-      >
-        <ProgressCircle />
-      </div>
-    )
-  }
-
   return (
-    <Box
-      marginHorizontal={{ mobile: 'none', tablet: 'xxxLarge' }}
-      marginVertical={{ mobile: 'none', tablet: "xxLarge" }}
-    >
-      {isAuthenticated ? (
-        <SettingsProvider>
-          <AdminHeader />
-          <NavTabs />
-          <Outlet />
-        </SettingsProvider>
-      ) : <UnauthenticatedApp />}
-    </Box>)
+    <div className="admin">
+      <div className="wrap">
+        {loading ? (
+          <div className="center">Loading…</div>
+        ) : isAuthenticated ? (
+          <SettingsProvider>
+            <AdminHeader />
+            <NavTabs />
+            <Outlet />
+          </SettingsProvider>
+        ) : <UnauthenticatedApp />}
+      </div>
+    </div>
+  );
 }
 
 function activeTab(pathname: string) {
   return TABS.find((t) => t.path !== "/" && pathname.startsWith(t.path)) ?? TABS[0];
 }
 
-// Store name, the per-store note, and Discard / Save for the settings tabs.
+// Store pill, the per-store note, and Discard / Save for the settings tabs.
 function AdminHeader() {
   const location = useLocation();
   const { store, dirty, save, discard, saving, saveError, savedAt } = useSettings();
   const onSettingsTab = !!activeTab(location.pathname).settings;
   return (
-    <Box marginBottom="medium">
-      <Flex justifyContent="space-between" alignItems="center" flexWrap="wrap" flexGap="12px">
-        <Box>
-          <Text bold marginBottom="none">AI Support · {store?.storeHash ? `store-${store.storeHash}` : "…"}</Text>
-          <Text color="secondary60" marginBottom="none">Multi-store app · every setting below is per store</Text>
-        </Box>
+    <>
+      <div className="appbar">
+        <div className="logo">AI</div>
+        <h1>AI Support</h1>
+        <span className="tenant"><span className="dot" />{store?.storeHash ? `store-${store.storeHash}` : "…"}</span>
+        <span className="hint" style={{ marginTop: 0 }}>Multi-store app · every setting below is per store</span>
+        <div className="spacer" />
         {onSettingsTab && (
-          <Flex flexGap="8px" alignItems="center">
-            {dirty && <Text color="secondary60" marginBottom="none">Unsaved changes</Text>}
-            <Button variant="subtle" onClick={discard} disabled={!dirty || saving}>Discard</Button>
-            {/* variant must be explicit: big-design's defaultProps are ignored under React 19 */}
-            <Button variant="primary" onClick={save} isLoading={saving} disabled={!dirty}>Save settings</Button>
-          </Flex>
+          <>
+            {dirty && <span className="hint" style={{ marginTop: 0 }}>Unsaved changes</span>}
+            <Btn onClick={discard} disabled={!dirty || saving}>Discard</Btn>
+            <Btn primary onClick={save} loading={saving} disabled={!dirty}>Save settings</Btn>
+          </>
         )}
-      </Flex>
-      {onSettingsTab && saveError && <Message type="error" messages={[{ text: saveError }]} marginTop="small" />}
-      {onSettingsTab && !dirty && savedAt && Date.now() - savedAt < 15000 && (
-        <Message type="success" messages={[{ text: "Settings saved." }]} marginTop="small" />
-      )}
-    </Box>
+      </div>
+      {onSettingsTab && saveError && <Alert tone="crit">{saveError}</Alert>}
+      {onSettingsTab && !dirty && savedAt && Date.now() - savedAt < 15000 && <Alert tone="good">Settings saved.</Alert>}
+    </>
   );
 }
 
@@ -132,27 +116,31 @@ function NavTabs() {
   const navigate = useNavigate();
   const location = useLocation();
   const { store } = useSettings();
+  const active = activeTab(location.pathname).id;
   // The CRM tab takes the name of the connected CRM.
   const crmTitle = freshdeskHost(store?.freshdeskDomain) && store?.freshdeskApiKey ? "Freshdesk" : "CRM";
   return (
-    <Tabs
-      activeTab={activeTab(location.pathname).id}
-      items={TABS.map((t) => ({ id: t.id, title: t.id === "crm" ? crmTitle : t.title }))}
-      onTabClick={(id) => navigate(TABS.find((t) => t.id === id)?.path ?? "/")}
-    />
+    <nav className="tabs" role="tablist">
+      {TABS.map((t) => (
+        <button key={t.id} role="tab" aria-selected={t.id === active} className={t.id === active ? "on" : ""} onClick={() => navigate(t.path)}>
+          {t.id === "crm" ? crmTitle : t.title}
+        </button>
+      ))}
+    </nav>
   );
 }
 
 function UnauthenticatedApp() {
   return (
-    <Panel description="App must be viewed in the BigCommerce control panel">
-      <Text>Edit this page: <Link target="_blank" href={`/edit/${process.env.GADGET_PUBLIC_APP_ENV}/files/web/components/App.tsx`}>web/components/App.tsx</Link></Text>
-    </Panel>
-  )
+    <div className="card" style={{ marginTop: 24 }}>
+      <h2>App must be viewed in the BigCommerce control panel</h2>
+      <p className="hint">Edit this page: <a target="_blank" href={`/edit/${process.env.GADGET_PUBLIC_APP_ENV}/files/web/components/App.tsx`}>web/components/App.tsx</a></p>
+    </div>
+  );
 }
 
 function Error404() {
-  return <div>404 not found</div>;
+  return <div className="card">404 not found</div>;
 }
 
 export default App;

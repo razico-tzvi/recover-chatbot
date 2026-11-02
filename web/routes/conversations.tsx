@@ -1,8 +1,8 @@
-import { Badge, Box, Button, Flex, Input, Message, Panel, Text } from "@bigcommerce/big-design";
 import { useAction, useFindMany } from "@gadgetinc/react";
 import { useState } from "react";
 import { api } from "../api";
 import { exportConversations } from "../lib/exports";
+import { Alert, Btn, Card, Tag } from "../components/ui";
 
 type Filter = "all" | "needsHuman" | "flagged";
 const FILTERS: { id: Filter; label: string; match: (s: any) => boolean; where?: Record<string, unknown> }[] = [
@@ -19,6 +19,12 @@ export const ConversationsPage = () => {
 
 function fmtDate(d: any) {
   try { return new Date(d).toLocaleString(); } catch (e) { return ""; }
+}
+
+function outcome(s: any) {
+  if (s.flagged) return <Tag tone="crit">Flagged</Tag>;
+  if (s.needsHuman) return <Tag tone="warn">Needs human</Tag>;
+  return <Tag tone="good">Answered</Tag>;
 }
 
 function SessionList({ onSelect }: { onSelect: (s: any) => void }) {
@@ -47,53 +53,50 @@ function SessionList({ onSelect }: { onSelect: (s: any) => void }) {
   }
 
   return (
-    <Panel header="Conversations" description="Chat sessions from your storefront assistant.">
-      <Flex marginBottom="small" flexGap="8px" alignItems="center" flexWrap="wrap">
-        <Box style={{ flex: 1, minWidth: 200 }}>
-          <Input placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} />
-        </Box>
+    <>
+      <div className="pills">
         {FILTERS.map((f) => (
-          <Button key={f.id} variant={filter === f.id ? "primary" : "secondary"} onClick={() => setFilter(f.id)}>
-            {`${f.label} (${(data || []).filter(f.match).length})`}
-          </Button>
+          <button key={f.id} type="button" className={filter === f.id ? "pill on" : "pill"} onClick={() => setFilter(f.id)}>
+            {`${f.label} · ${(data || []).filter(f.match).length}`}
+          </button>
         ))}
-        <Button variant="subtle" isLoading={exporting === "csv"} onClick={() => runExport("csv")}>Export CSV</Button>
-        <Button variant="subtle" isLoading={exporting === "json"} onClick={() => runExport("json")}>Export JSON</Button>
-      </Flex>
-      {exportErr && <Message type="error" messages={[{ text: "Export failed. Please try again." }]} marginBottom="small" />}
-      {fetching && <Text color="secondary60">Loading…</Text>}
-      {error && <Message type="error" messages={[{ text: "Couldn't load conversations." }]} />}
-      {data && sessions.length === 0 && !fetching && (
-        <Text color="secondary60">{query ? "No conversations match your search." : "No conversations yet. They'll appear here once shoppers start chatting."}</Text>
-      )}
-      {sessions.map((s: any) => (
-        <Box
-          key={s.id}
-          border="box"
-          borderRadius="normal"
-          padding="small"
-          marginBottom="xSmall"
-          style={{ cursor: "pointer" }}
-          onClick={() => onSelect(s)}
-        >
-          <Flex justifyContent="space-between" alignItems="center" flexGap="12px">
-            <Box style={{ minWidth: 0 }}>
-              <Flex flexGap="8px" alignItems="center">
-                {s.needsHuman && <Badge variant="warning" label="Needs human" />}
-                {s.flagged && <Badge variant="danger" label="Flagged" />}
-                <Text bold marginBottom="none" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {s.preview || "(no preview)"}
-                </Text>
-              </Flex>
-              <Text color="secondary60" marginBottom="none">
-                {(s.messageCount ?? 0) + " messages · " + fmtDate(s.updatedAt) + (s.model ? " · " + s.model : "")}
-              </Text>
-            </Box>
-            <Text color="secondary60">›</Text>
-          </Flex>
-        </Box>
-      ))}
-    </Panel>
+        <div className="spacer" />
+        <input type="search" placeholder="Search conversations…" value={q} onChange={(e) => setQ(e.target.value)} style={{ maxWidth: 240 }} />
+        <Btn small loading={exporting === "csv"} onClick={() => runExport("csv")}>Export CSV</Btn>
+        <Btn small loading={exporting === "json"} onClick={() => runExport("json")}>Export JSON</Btn>
+      </div>
+      {exportErr && <Alert tone="crit">Export failed. Please try again.</Alert>}
+      {error && <Alert tone="crit">Couldn't load conversations.</Alert>}
+      <div className="card" style={{ padding: "6px 20px" }}>
+        {fetching && !data && <div className="loading">Loading…</div>}
+        {data && sessions.length === 0 && !fetching && (
+          <p className="hint" style={{ padding: "12px 0" }}>
+            {query ? "No conversations match your search." : "No conversations yet. They'll appear here once shoppers start chatting."}
+          </p>
+        )}
+        {sessions.length > 0 && (
+          <div className="tablewrap">
+            <table>
+              <thead>
+                <tr><th>When</th><th>Channel</th><th>Preview</th><th>Outcome</th><th className="num">Messages</th><th>Model</th></tr>
+              </thead>
+              <tbody>
+                {sessions.map((s: any) => (
+                  <tr key={s.id} className="click" onClick={() => onSelect(s)}>
+                    <td style={{ whiteSpace: "nowrap" }}>{fmtDate(s.updatedAt)}</td>
+                    <td><Tag tone="info">Site</Tag></td>
+                    <td className="ellipsis">{s.preview ? `"${s.preview}"` : "(no preview)"}</td>
+                    <td>{outcome(s)}</td>
+                    <td className="num">{s.messageCount ?? 0}</td>
+                    <td className="mono">{s.model || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
 
@@ -147,81 +150,58 @@ function Conversation({ session, onBack }: { session: any; onBack: () => void })
   const meta = [session.provider, session.model].filter(Boolean).join(" · ");
 
   return (
-    <Panel header="Conversation" description={"Started " + fmtDate(session.createdAt) + (meta ? " · " + meta : "")}>
-      <Flex justifyContent="space-between" alignItems="center" marginBottom="small" flexGap="8px" flexWrap="wrap">
-        <Button variant="subtle" onClick={onBack}>← Back</Button>
-        <Flex flexGap="8px">
-          <Button variant="secondary" onClick={exportCsv} disabled={!data || data.length === 0}>Export CSV</Button>
-          {!confirming ? (
-            <Button actionType="destructive" variant="subtle" onClick={() => setConfirming(true)}>Delete</Button>
-          ) : (
-            <>
-              <Button variant="primary" actionType="destructive" onClick={handleDelete} isLoading={busy}>Confirm delete</Button>
-              <Button variant="subtle" onClick={() => setConfirming(false)} disabled={busy}>Cancel</Button>
-            </>
-          )}
-        </Flex>
-      </Flex>
+    <>
+      <div className="row" style={{ marginBottom: 14 }}>
+        <Btn small onClick={onBack}>← Back</Btn>
+        <div className="spacer" />
+        <Btn small onClick={exportCsv} disabled={!data || data.length === 0}>Export CSV</Btn>
+        {!confirming ? (
+          <Btn small danger onClick={() => setConfirming(true)}>Delete</Btn>
+        ) : (
+          <>
+            <Btn small danger primary onClick={handleDelete} loading={busy}>Confirm delete</Btn>
+            <Btn small onClick={() => setConfirming(false)} disabled={busy}>Cancel</Btn>
+          </>
+        )}
+      </div>
 
-      {actionErr && <Message type="error" messages={[{ text: "Action failed. Please try again." }]} marginVertical="small" />}
+      {actionErr && <Alert tone="crit">Action failed. Please try again.</Alert>}
       {needsHuman && (
-        <Box border="box" borderRadius="normal" padding="small" marginBottom="small" backgroundColor="warning10">
-          <Flex justifyContent="space-between" alignItems="flex-start" flexGap="12px" flexWrap="wrap">
-            <Box style={{ minWidth: 0 }}>
-              <Text bold marginBottom="xxSmall">
-                {"Handoff requested " + fmtDate(session.handoffAt)}
-              </Text>
-              <Text marginBottom="xxSmall">
-                {"Reply to: "}
-                <a href={"mailto:" + session.handoffEmail}>{session.handoffEmail}</a>
-              </Text>
-              <Text marginBottom="none" style={{ whiteSpace: "pre-wrap" }}>{session.handoffSummary}</Text>
-            </Box>
-            <Button variant="secondary" onClick={markResolved} isLoading={resolving}>Mark resolved</Button>
-          </Flex>
-        </Box>
+        <div className="card" style={{ background: "var(--warn-soft)", borderColor: "transparent" }}>
+          <div className="row between" style={{ alignItems: "flex-start" }}>
+            <div style={{ minWidth: 0 }}>
+              <h2>{"Handoff requested " + fmtDate(session.handoffAt)}</h2>
+              <p className="hint">Reply to: <a href={"mailto:" + session.handoffEmail}>{session.handoffEmail}</a></p>
+              {session.handoffSummary && <p style={{ whiteSpace: "pre-wrap", marginTop: 6 }}>{session.handoffSummary}</p>}
+            </div>
+            <Btn small onClick={markResolved} loading={resolving}>Mark resolved</Btn>
+          </div>
+        </div>
       )}
       {session.flagged && (
-        <Message
-          type="warning"
-          header={"Flagged " + fmtDate(session.flaggedAt)}
-          messages={[{ text: session.flagReason || "Flagged by a safeguard." }]}
-          marginBottom="small"
-        />
+        <Alert tone="crit">{"Flagged " + fmtDate(session.flaggedAt) + " — " + (session.flagReason || "Flagged by a safeguard.")}</Alert>
       )}
-      {fetching && <Text color="secondary60">Loading…</Text>}
-      {error && <Message type="error" messages={[{ text: "Couldn't load this conversation." }]} />}
 
-      {(data || []).map((m: any) => {
-        const isUser = m.role === "user";
-        return (
-          <Flex key={m.id} flexDirection="column" alignItems={isUser ? "flex-end" : "flex-start"} marginBottom="small">
-            <Box
-              padding="small"
-              style={{
-                maxWidth: "80%",
-                borderRadius: 14,
-                background: isUser ? "#ef6526" : "#f1f2f4",
-                color: isUser ? "#fff" : "#1a1a1a",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-              }}
-            >
-              {m.content?.trim() ? <Text marginBottom="none" style={{ color: "inherit" }}>{m.content.trim()}</Text> : null}
+      <Card title={"Transcript · " + fmtDate(session.createdAt)} sub={"Site chat" + (meta ? " · " + meta : "") + " · every AI message carries its tool metadata."}>
+        {fetching && <div className="loading">Loading…</div>}
+        {error && <Alert tone="crit">Couldn't load this conversation.</Alert>}
+        {(data || []).map((m: any) => {
+          const isUser = m.role === "user";
+          const tools = Array.isArray(m.tools) && m.tools.length ? m.tools.join(", ") : "";
+          return (
+            <div key={m.id} className={isUser ? "msg" : "msg bot"}>
+              <div className="who">{isUser ? "Customer" : "Assistant"} · {fmtDate(m.createdAt)}</div>
+              {m.content?.trim() || null}
               {Array.isArray(m.images) && m.images.length > 0 && (
-                <Flex flexWrap="wrap" flexGap="6px" style={{ marginTop: m.content ? 6 : 0 }}>
-                  {m.images.map((src: string, i: number) => (
-                    <img key={i} src={src} style={{ maxWidth: 140, maxHeight: 140, borderRadius: 8, display: "block" }} />
-                  ))}
-                </Flex>
+                <div className="row" style={{ marginTop: 6, gap: 6 }}>
+                  {m.images.map((src: string, i: number) => <img key={i} src={src} alt={`Upload ${i + 1}`} />)}
+                </div>
               )}
-            </Box>
-            <Text color="secondary60" marginBottom="none" style={{ fontSize: 11, marginTop: 2 }}>
-              {fmtDate(m.createdAt) + (Array.isArray(m.tools) && m.tools.length ? " · tools: " + m.tools.join(", ") : "")}
-            </Text>
-          </Flex>
-        );
-      })}
-    </Panel>
+              {!isUser && tools && <div className="meta">tools: {tools}</div>}
+            </div>
+          );
+        })}
+      </Card>
+    </>
   );
 }

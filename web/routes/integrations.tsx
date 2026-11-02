@@ -1,9 +1,9 @@
-import { Badge, Box, Button, Flex, FormGroup, Input, Message, Modal, Panel, Select, Tabs, Text } from "@bigcommerce/big-design";
 import { useState } from "react";
 import { api } from "../api";
 import { CLAUDE_MODELS, FEATURES } from "../../api/lib/defaults";
 import { freshdeskHost } from "../../api/lib/integrations";
 import { hasSecret, useSettings, type Draft } from "../lib/settings";
+import { Alert, Btn, Field, Loading, Modal, Tag } from "../components/ui";
 
 type Id = "anthropic" | "bigcommerce" | "freshdesk" | "shipstation";
 type TestResult = { ok: boolean; message: string; missing?: string[] };
@@ -11,10 +11,10 @@ type TestResult = { ok: boolean; message: string; missing?: string[] };
 const IS_DEV = process.env.GADGET_PUBLIC_APP_ENV === "development";
 
 const TILES: { id: Id; name: string; letter: string; color: string; powers: string }[] = [
-  { id: "anthropic", name: "Anthropic", letter: "A", color: "#d97757", powers: "All AI responses" },
-  { id: "bigcommerce", name: "BigCommerce", letter: "B", color: "#34313f", powers: "Catalog, order lookup, carts & checkout" },
-  { id: "freshdesk", name: "Freshdesk", letter: "F", color: "#25c16f", powers: "Ticket history, ticket drafting, handoff tickets" },
-  { id: "shipstation", name: "ShipStation", letter: "S", color: "#84c225", powers: "Carrier tracking and delivery estimates" },
+  { id: "anthropic", name: "Anthropic", letter: "A", color: "#CC785C", powers: "Powers every AI response. One key, a model per role." },
+  { id: "bigcommerce", name: "BigCommerce", letter: "B", color: "#34313F", powers: "Installed app · catalog, order lookup, carts & checkout." },
+  { id: "freshdesk", name: "Freshdesk", letter: "F", color: "#2BB24C", powers: "The connected CRM: ticket history, ticket drafting, handoff tickets." },
+  { id: "shipstation", name: "ShipStation", letter: "S", color: "#7FBA42", powers: "Carrier-level tracking events and delivery estimates for order lookups." },
 ];
 
 // Permissions the bot's tools need on the app's OAuth token. `probed` ones are
@@ -32,10 +32,10 @@ const BC_PERMISSIONS = [
 export const IntegrationsPage = () => {
   const { store, draft, loading } = useSettings();
   const [open, setOpen] = useState<Id | null>(null);
-  const [group, setGroup] = useState("integrated");
+  const [group, setGroup] = useState<"in" | "out">("in");
   const [results, setResults] = useState<Partial<Record<Id, TestResult>>>({});
 
-  if (loading || !draft) return <Panel><Text color="secondary60">Loading…</Text></Panel>;
+  if (loading || !draft) return <Loading />;
 
   const connected: Record<Id, boolean> = {
     anthropic: draft.llmProvider === "anthropic" ? !!draft.llmModel && (hasSecret(store, "llmApiKey") || !!draft.llmApiKey) : !!draft.llmBaseUrl && !!draft.llmModel,
@@ -44,65 +44,62 @@ export const IntegrationsPage = () => {
     shipstation: hasSecret(store, "shipstationApiKey") || !!draft.shipstationApiKey,
   };
 
-  const badge = (id: Id) => {
+  const status = (id: Id): { text: string; tone: "good" | "warn" | "crit" } => {
     const r = results[id];
-    if (id === "bigcommerce" && r?.missing?.length) return <Badge variant="warning" label={`${r.missing.length} permission${r.missing.length > 1 ? "s" : ""} missing`} />;
-    if (r && !r.ok) return <Badge variant="danger" label="Test failed" />;
-    if (connected[id]) return <Badge variant="success" label="Connected" />;
-    return <Badge variant="secondary" label="Setup needed" />;
+    if (id === "bigcommerce" && r?.missing?.length) return { text: `Connected · ${r.missing.length} permission${r.missing.length > 1 ? "s" : ""} missing`, tone: "warn" };
+    if (r && !r.ok) return { text: "Test failed", tone: "crit" };
+    if (connected[id]) return { text: "Connected", tone: "good" };
+    return { text: "Setup needed", tone: "warn" };
   };
 
-  const shown = TILES.filter((t) => (group === "integrated") === connected[t.id]);
+  const inCount = TILES.filter((t) => connected[t.id]).length;
+  const shown = TILES.filter((t) => (group === "in") === connected[t.id]);
+  const current = open && TILES.find((t) => t.id === open);
 
   return (
-    <Panel header="Integrations" description="Click a tile to manage its credentials and test the connection. Credential changes are saved with Save settings.">
-      <Tabs
-        activeTab={group}
-        items={[
-          { id: "integrated", title: `Integrated (${TILES.filter((t) => connected[t.id]).length})` },
-          { id: "not", title: `Not yet integrated (${TILES.filter((t) => !connected[t.id]).length})` },
-        ]}
-        onTabClick={setGroup}
-      />
-      <Flex flexWrap="wrap" flexGap="12px" marginTop="medium">
-        {shown.length === 0 && <Text color="secondary60">Nothing here.</Text>}
+    <>
+      <div className="note">
+        BigCommerce connects with one click as an installed app. ShipStation and Freshdesk authenticate with API keys, so each panel
+        tells you exactly where the key lives, then tests the connection. Credential changes are saved with Save settings.
+      </div>
+      <div className="pills">
+        <button type="button" className={group === "in" ? "pill on" : "pill"} onClick={() => setGroup("in")}>Integrated · {inCount}</button>
+        <button type="button" className={group === "out" ? "pill on" : "pill"} onClick={() => setGroup("out")}>Not yet integrated · {TILES.length - inCount}</button>
+      </div>
+      <div className="tiles">
+        {shown.length === 0 && <span className="hint">Nothing here.</span>}
         {shown.map((t) => (
-          <Box
-            key={t.id}
-            border="box"
-            borderRadius="normal"
-            padding="medium"
-            style={{ width: 240, cursor: "pointer" }}
-            onClick={() => setOpen(t.id)}
-          >
-            <Flex alignItems="center" flexGap="10px" marginBottom="xSmall">
-              <div style={{ width: 36, height: 36, borderRadius: 8, background: t.color, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>
-                {t.letter}
-              </div>
-              <Text bold marginBottom="none">{t.name}</Text>
-            </Flex>
-            <Text color="secondary60" marginBottom="xSmall">{t.powers}</Text>
-            {badge(t.id)}
-          </Box>
+          <button type="button" key={t.id} className="tile" onClick={() => setOpen(t.id)}>
+            <span className="mark" style={{ background: t.color }}>{t.letter}</span>
+            <span><b>{t.name}</b><span className="tstat">{connected[t.id] || results[t.id] ? status(t.id).text : "Not yet integrated"}</span></span>
+          </button>
         ))}
-      </Flex>
-      {open && (
+      </div>
+      <p className="hint" style={{ margin: "-4px 0 16px" }}>Click a tile to open its settings.</p>
+      {current && (
         <IntegrationModal
-          id={open}
+          tile={current}
+          badge={<Tag tone={status(current.id).tone}>{status(current.id).text}</Tag>}
           onClose={() => setOpen(null)}
-          result={results[open]}
-          onResult={(r) => setResults((x) => ({ ...x, [open]: r }))}
+          result={results[current.id]}
+          onResult={(r) => setResults((x) => ({ ...x, [current.id]: r }))}
         />
       )}
-    </Panel>
+    </>
   );
 };
 
-function IntegrationModal({ id, onClose, result, onResult }: { id: Id; onClose: () => void; result?: TestResult; onResult: (r: TestResult) => void }) {
+function IntegrationModal({ tile, badge, onClose, result, onResult }: {
+  tile: (typeof TILES)[number];
+  badge: React.ReactNode;
+  onClose: () => void;
+  result?: TestResult;
+  onResult: (r: TestResult) => void;
+}) {
   const { store, draft, set } = useSettings();
   const d = draft as Draft;
   const [testing, setTesting] = useState(false);
-  const tile = TILES.find((t) => t.id === id)!;
+  const id = tile.id;
 
   const test = async () => {
     setTesting(true);
@@ -119,128 +116,111 @@ function IntegrationModal({ id, onClose, result, onResult }: { id: Id; onClose: 
     setTesting(false);
   };
 
-  const secretInput = (key: "llmApiKey" | "freshdeskApiKey" | "shipstationApiKey" | "shipstationApiSecret", label: string, description?: string) => (
-    <FormGroup>
-      <Input
-        label={label}
+  const secretInput = (key: "llmApiKey" | "freshdeskApiKey" | "shipstationApiKey" | "shipstationApiSecret", label: string, hint?: string) => (
+    <Field label={label} htmlFor={`i-${key}`} hint={hint}>
+      <input
         type="password"
-        description={description}
+        id={`i-${key}`}
+        autoComplete="off"
         value={d[key]}
         placeholder={hasSecret(store, key) ? "•••••••• (leave blank to keep current)" : "Paste it here"}
         onChange={(e) => set(key, e.target.value)}
       />
-    </FormGroup>
+    </Field>
+  );
+
+  const modelSelect = (label: string, hint: string, value: string, onChange: (v: string) => void, sameAsChat?: boolean) => (
+    <Field label={label} hint={hint}>
+      <select value={value} onChange={(e) => onChange(e.target.value)}>
+        {sameAsChat ? <option value="">Same as chat model</option> : !CLAUDE_MODELS.some((m) => m.value === value) && <option value="">Choose a model</option>}
+        {CLAUDE_MODELS.map((m) => <option key={m.value} value={m.value}>{m.content}</option>)}
+      </select>
+    </Field>
   );
 
   return (
     <Modal
-      isOpen
-      header={tile.name}
+      title={tile.name}
+      badge={badge}
+      sub={tile.powers}
       onClose={onClose}
-      closeOnClickOutside
-      actions={[
-        ...(id === "bigcommerce" ? [] : [{ text: "Test connection", variant: "secondary" as const, isLoading: testing, onClick: test }]),
-        ...(id === "bigcommerce" ? [{ text: "Review permissions", variant: "secondary" as const, isLoading: testing, onClick: test }] : []),
-        { text: "Done", onClick: onClose },
-      ]}
+      footer={<Btn primary={id === "shipstation" && !hasSecret(store, "shipstationApiKey")} loading={testing} onClick={test}>{id === "bigcommerce" ? "Review permissions" : "Test connection"}</Btn>}
     >
       {id === "anthropic" && (
-        <>
+        <div className="grid2">
           {IS_DEV && (
-            <FormGroup>
-              <Select
-                label="Provider"
-                description="Production always runs on Anthropic; the OpenAI-compatible option exists in development only."
-                options={[
-                  { value: "anthropic", content: "Anthropic (Claude)" },
-                  { value: "openai", content: "OpenAI-compatible (dev only)" },
-                ]}
-                value={d.llmProvider}
-                onOptionChange={(v) => set("llmProvider", v as string)}
-              />
-            </FormGroup>
+            <Field label="Provider" full hint="Production always runs on Anthropic; the OpenAI-compatible option exists in development only.">
+              <select value={d.llmProvider} onChange={(e) => set("llmProvider", e.target.value)}>
+                <option value="anthropic">Anthropic (Claude)</option>
+                <option value="openai">OpenAI-compatible (dev only)</option>
+              </select>
+            </Field>
           )}
           {d.llmProvider === "anthropic" ? (
             <>
-              {secretInput("llmApiKey", "API key", "Create one at console.anthropic.com → Settings → API keys.")}
-              <FormGroup>
-                <Select
-                  label="Chat model"
-                  description="Answers shoppers in the storefront widget."
-                  options={CLAUDE_MODELS}
-                  value={CLAUDE_MODELS.some((m) => m.value === d.llmModel) ? d.llmModel : undefined}
-                  placeholder="Choose a model"
-                  onOptionChange={(v) => set("llmModel", v as string)}
-                />
-              </FormGroup>
-              {(["crm", "analysis"] as const).map((role) => (
-                <FormGroup key={role}>
-                  <Select
-                    label={role === "crm" ? "CRM model" : "Analysis model"}
-                    description={role === "crm" ? "Drafts and answers Freshdesk tickets." : "Runs the learning loop's analysis."}
-                    options={[{ value: "", content: "Same as chat model" }, ...CLAUDE_MODELS]}
-                    value={d.anthropicModels[role]}
-                    onOptionChange={(v) => set("anthropicModels", { ...d.anthropicModels, [role]: v as string })}
-                  />
-                </FormGroup>
-              ))}
+              {secretInput("llmApiKey", "API key", "console.anthropic.com › Settings › API keys.")}
+              {modelSelect("Chat model", "Answers shoppers in the storefront widget.", d.llmModel, (v) => set("llmModel", v))}
+              {modelSelect("CRM model", "Drafts and answers Freshdesk tickets.", d.anthropicModels.crm, (v) => set("anthropicModels", { ...d.anthropicModels, crm: v }), true)}
+              {modelSelect("Analysis model (learning runs)", "Runs the learning loop's analysis.", d.anthropicModels.analysis, (v) => set("anthropicModels", { ...d.anthropicModels, analysis: v }), true)}
             </>
           ) : (
             <>
-              <FormGroup>
-                <Input label="API base URL" value={d.llmBaseUrl} placeholder="https://.../v1" onChange={(e) => set("llmBaseUrl", e.target.value)} />
-              </FormGroup>
-              <FormGroup>
-                <Input label="Model" value={d.llmModel} onChange={(e) => set("llmModel", e.target.value)} />
-              </FormGroup>
+              <Field label="API base URL" htmlFor="i-base">
+                <input type="text" id="i-base" value={d.llmBaseUrl} placeholder="https://.../v1" onChange={(e) => set("llmBaseUrl", e.target.value)} />
+              </Field>
+              <Field label="Model" htmlFor="i-model">
+                <input type="text" id="i-model" value={d.llmModel} onChange={(e) => set("llmModel", e.target.value)} />
+              </Field>
               {secretInput("llmApiKey", "API key", "Leave blank if the endpoint doesn't need one.")}
             </>
           )}
-        </>
+        </div>
       )}
 
       {id === "bigcommerce" && (
         <>
-          <Text>Connected through the app install (one-click OAuth). The bot needs these permissions:</Text>
-          {BC_PERMISSIONS.map((p) => {
-            const missing = result?.missing?.includes(p.name);
-            return (
-              <Flex key={p.name} justifyContent="space-between" marginBottom="xxSmall">
-                <Text marginBottom="none">{p.name}</Text>
-                {result && p.probed ? <Badge variant={missing ? "warning" : "success"} label={missing ? "Missing" : "Granted"} /> : null}
-              </Flex>
-            );
-          })}
-          <Text color="secondary60" marginTop="small">
-            Features that need a missing permission ({FEATURES.filter((f) => f.needs).map((f) => f.label).join(", ")}) apologize and offer a handoff until it's added. After adding permissions to the app, re-authorize it from the store's Apps page.
-          </Text>
+          <div className="chips">
+            {BC_PERMISSIONS.map((p) => {
+              const missing = result?.missing?.includes(p.name);
+              return <span key={p.name} className={`tag ${result && p.probed ? (missing ? "warn" : "good") : ""}`}>{p.name}</span>;
+            })}
+          </div>
+          {!!result?.missing?.length && (
+            <Alert tone="warn">
+              {result.missing.length} permission{result.missing.length > 1 ? "s" : ""} missing: {result.missing.join(", ")}.
+            </Alert>
+          )}
+          <p className="hint">
+            Connected through the app install (one-click OAuth). Features that need a missing permission
+            ({FEATURES.filter((f) => f.needs).map((f) => f.label).join(", ")}) apologize and offer a handoff until it's added.
+            After adding permissions to the app, re-authorize it from the store's Apps page.
+          </p>
         </>
       )}
 
       {id === "freshdesk" && (
         <>
-          <FormGroup>
-            <Input
-              label="Freshdesk domain"
-              description="e.g. yourcompany.freshdesk.com"
-              value={d.freshdeskDomain}
-              onChange={(e) => set("freshdeskDomain", e.target.value)}
-            />
-          </FormGroup>
-          {secretInput("freshdeskApiKey", "API key", "In Freshdesk: your profile picture → Profile settings → View API key.")}
-          <Text color="secondary60">Ticket history sync and ticket drafting arrive with the CRM tab. Today the connection powers handoff tickets.</Text>
+          <div className="grid2">
+            <Field label="Domain" htmlFor="i-fdd" hint="e.g. yourcompany.freshdesk.com">
+              <input type="text" id="i-fdd" value={d.freshdeskDomain} onChange={(e) => set("freshdeskDomain", e.target.value)} />
+            </Field>
+            {secretInput("freshdeskApiKey", "API key")}
+          </div>
+          <p className="hint">The key lives in Freshdesk under Profile settings › View API key. Ticket history sync and drafting arrive with the CRM tab; today the connection powers handoff tickets.</p>
         </>
       )}
 
       {id === "shipstation" && (
         <>
-          {secretInput("shipstationApiKey", "API key", "In ShipStation: Settings → Account → API Settings.")}
-          {secretInput("shipstationApiSecret", "API secret", "Only for V1 keys. Leave blank for a V2 API key.")}
-          <Text color="secondary60">Tracking events in order lookup arrive in a later release; you can connect and test now.</Text>
+          <div className="grid2">
+            {secretInput("shipstationApiKey", "API key")}
+            {secretInput("shipstationApiSecret", "API secret", "Only for V1 keys. Leave blank for a V2 key.")}
+          </div>
+          <p className="hint">Get the key in ShipStation under Settings › Account › API Settings, paste it once, then test. Tracking events in order lookup arrive in a later release.</p>
         </>
       )}
 
-      {result && <Message type={result.ok ? "success" : "error"} messages={[{ text: result.message }]} marginTop="medium" />}
+      {result && <Alert tone={result.ok ? "good" : "crit"}>{result.message}</Alert>}
     </Modal>
   );
 }
