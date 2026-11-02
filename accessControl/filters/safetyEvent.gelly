@@ -1,0 +1,3 @@
+filter ($session: Session) on SafetyEvent [
+  where storeId == $session.bigcommerceStoreId
+]

@@ -11,12 +11,12 @@ npm install -g ggt        # one-time
 ggt dev                   # sync local files to the Gadget development env + stream logs
 ```
 
-- **App UI (admin settings panel)** does NOT stand alone —
+- **App UI (admin, 9 tabs: General, Context, Integrations, Features, CRM,
+  Analytics, Conversations, Learning, API)** does NOT stand alone —
   `https://recover-ai-chat--development.gadget.app` (root) only shows the
   "App must be viewed in the BigCommerce control panel" placeholder. The real
-  settings UI (LLM provider/model/API key, system prompt, Conversations) only
-  renders when embedded in an **installed store's BigCommerce control panel**
-  (Apps → Recover AI Chatbot).
+  admin only renders when embedded in an **installed store's BigCommerce
+  control panel** (Apps → Recover AI Chatbot).
 - **Developer editor:** `https://recover-ai-chat.gadget.app/edit/development`
   — Gadget editor with Files / Logs / Preview / API / Queues / Installs /
   Ops / Settings / Docs tabs; its Preview tab shows the app UI unauthenticated.
@@ -43,6 +43,9 @@ backend (default: production `https://recover-ai-chat.gadget.app`):
 ```
 
 - `store=` is required — the widget exits immediately without it.
+- Branding (bot name, color, greeting, suggestions, disclaimer) comes from the
+  store's General tab; `data-*` attributes only apply when the store row
+  doesn't exist in that env.
 - CORS is fine for local origins: `POST-chat.js` echoes the request's
   `Origin` into `Access-Control-Allow-Origin`.
 
@@ -72,19 +75,24 @@ setup (ggt dev + `stencil start` + the script tag in
 
 ## Conventions
 
-- `api/routes/POST-chat.js` — chat endpoint; `DEFAULT_SYSTEM` is the built-in
-  system prompt, overridable per store via the `systemPrompt` store field
-  (admin Settings tab). The admin pre-fill copy in `web/routes/index.tsx`
-  (`DEFAULT_SYSTEM_PROMPT`) **must be kept in sync** with `DEFAULT_SYSTEM`.
-  The store FAQ is a separate `faq` store field appended by `buildSystem`;
-  `DEFAULT_FAQ` exists in both files and must also stay in sync.
-- Tools, handoff, stock alerts, required OAuth scopes and test status are
-  documented in `docs/CHATBOT-TOOLS.md` — keep it updated when tools change.
-- `api/actions/sendStockAlerts.ts` — scheduled (every 30 min); emails
-  `stockAlert` rows created by the `notify_back_in_stock` tool.
+- Admin v2 spec ("Recover AI Chatbot - Admin v2 Requirements", ClickUp task
+  86eybafcf) is built in 5 phases; phase 1 is done. Every setting is per store
+  (multi-tenant) and editable in the admin — nothing Recover-specific in code.
+- `api/lib/defaults.js` — the single source for context-block defaults
+  (`DEFAULT_GUIDELINES`, `DEFAULT_FAQ`, voice & tone, …), the non-editable
+  `GUARDRAILS`, branding, `FEATURES` (feature → tools) and `DEFAULT_SAFEGUARDS`,
+  plus `resolve*` helpers. Imported by both the backend and the admin (`web/`),
+  so keep it free of server-only imports.
+- `api/routes/POST-chat.js` — chat endpoint: rate limits, feature-gated tool
+  list, verify-only order lookup + lockouts, `buildSystem` (guardrails + store
+  context blocks).
+- Tools, safeguards, handoff, admin tabs, required OAuth scopes and test status
+  are documented in `docs/CHATBOT-TOOLS.md` — keep it updated when tools change.
+- Back-in-stock is removed for now (tool, cron, admin list); the `stockAlert`
+  model is kept.
 - `api/routes/GET-widget.js` — serves the widget; `?api=` and `?store=` query
-  params control backend + store; per-store feature flags (vision) come from
-  the `bigcommerce/store` row.
+  params control backend + store; branding and feature flags (vision) come
+  from the `bigcommerce/store` row.
 - `api/injectWidget.js` — Scripts-API injection used on app install
   (production path; local testing uses the manual script tag above).
 - Product URLs from BigCommerce are storefront-relative; `POST-chat.js`

@@ -9,8 +9,10 @@ export const schema: GadgetModel = {
   fields: {
     content: { type: "string", storageKey: "jSbC_DzWUpoX" },
     images: { type: "json", storageKey: "msg-images" },
+    ip: { type: "string", storageKey: "msg-ip" },
     role: { type: "string", storageKey: "gzUhLQExcMX-" },
     sessionId: { type: "string", storageKey: "NtdmBcP_xIhg" },
     storeId: { type: "string", storageKey: "fDRCtfX5asU3" },
+    tools: { type: "json", storageKey: "msg-tools" },
   },
 };

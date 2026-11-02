@@ -49,6 +49,15 @@ export const permissions: GadgetPermissions = {
             },
           },
         },
+        safetyEvent: {
+          read: {
+            filter: "accessControl/filters/safetyEvent.gelly",
+          },
+        },
+      },
+      actions: {
+        getCatalog: true,
+        testIntegration: true,
       },
     },
     unauthenticated: {

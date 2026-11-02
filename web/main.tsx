@@ -14,14 +14,18 @@ const AppGlobalStyles = createGlobalStyle`
     background-color: ${({ theme }) => theme.colors.secondary10}
   }
   /* big-design caps form-field width (~432px) for readability; let the
-     system-prompt field use the full panel width instead. The class wraps the
+     long text fields use the full panel width instead. The class wraps the
      whole FormGroup so the override reaches the width cap. */
-  .system-prompt-field,
-  .system-prompt-field * {
+  .wide-field,
+  .wide-field * {
     max-width: 100% !important;
   }
-  .system-prompt-field textarea {
+  .wide-field textarea {
     width: 100% !important;
+  }
+  /* big-design caps Textarea rows at 7; context-block editors need more room. */
+  .tall-field textarea {
+    min-height: 360px;
   }
 `
 
