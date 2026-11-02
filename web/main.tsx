@@ -13,6 +13,16 @@ const AppGlobalStyles = createGlobalStyle`
     height: 100%;
     background-color: ${({ theme }) => theme.colors.secondary10}
   }
+  /* big-design caps form-field width (~432px) for readability; let the
+     system-prompt field use the full panel width instead. The class wraps the
+     whole FormGroup so the override reaches the width cap. */
+  .system-prompt-field,
+  .system-prompt-field * {
+    max-width: 100% !important;
+  }
+  .system-prompt-field textarea {
+    width: 100% !important;
+  }
 `
 
 ReactDOM.createRoot(root).render(

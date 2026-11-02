@@ -1,5 +1,4 @@
-import { useEffect } from "react";
-import { Box, H1, Link, Panel, ProgressCircle, Text } from "@bigcommerce/big-design"
+import { Box, Link, Panel, ProgressCircle, Tabs, Text } from "@bigcommerce/big-design"
 import { Provider as GadgetProvider, useGadget } from "@gadgetinc/react-bigcommerce";
 import {
   Outlet,
@@ -12,12 +11,14 @@ import {
 } from "react-router";
 import { api } from "../api";
 import { IndexPage } from "../routes/index";
+import { ConversationsPage } from "../routes/conversations";
 
 function App() {
   const router = createBrowserRouter(
     createRoutesFromElements(
       <Route path="/" element={<Layout />}>
         <Route index element={<IndexPage />} />
+        <Route path="conversations" element={<ConversationsPage />} />
         <Route path="*" element={<Error404 />} />
       </Route>
     )
@@ -58,8 +59,24 @@ function AuthenticatedApp() {
       marginHorizontal={{ mobile: 'none', tablet: 'xxxLarge' }}
       marginVertical={{ mobile: 'none', tablet: "xxLarge" }}
     >
-      {isAuthenticated ? <Outlet /> : <UnauthenticatedApp />}
+      {isAuthenticated ? (<><NavTabs /><Outlet /></>) : <UnauthenticatedApp />}
     </Box>)
+}
+
+function NavTabs() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const active = location.pathname.startsWith("/conversations") ? "conversations" : "settings";
+  return (
+    <Tabs
+      activeTab={active}
+      items={[
+        { id: "settings", title: "Settings" },
+        { id: "conversations", title: "Conversations" },
+      ]}
+      onTabClick={(id) => navigate(id === "conversations" ? "/conversations" : "/")}
+    />
+  );
 }
 
 function UnauthenticatedApp() {
