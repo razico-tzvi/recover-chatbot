@@ -1,0 +1,3 @@
+filter ($session: Session) on StockAlert [
+  where storeId == $session.bigcommerceStoreId
+]

@@ -44,6 +44,9 @@ export const permissions: GadgetPermissions = {
             delete: {
               filter: "accessControl/filters/chatSession.gelly",
             },
+            update: {
+              filter: "accessControl/filters/chatSession.gelly",
+            },
           },
         },
       },

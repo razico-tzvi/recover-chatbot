@@ -7,8 +7,23 @@ export const schema: GadgetModel = {
   type: "gadget/model-schema/v2",
   storageKey: "0ZfmLTW_J4KS",
   fields: {
+    handoffAt: {
+      type: "dateTime",
+      includeTime: true,
+      storageKey: "sess-handoffAt",
+    },
+    handoffEmail: { type: "string", storageKey: "sess-handoffEmail" },
+    handoffSummary: {
+      type: "string",
+      storageKey: "sess-handoffSummary",
+    },
     messageCount: { type: "number", storageKey: "c7KWOjGrn3Ir" },
     model: { type: "string", storageKey: "sess-model" },
+    needsHuman: {
+      type: "boolean",
+      default: false,
+      storageKey: "sess-needsHuman",
+    },
     preview: { type: "string", storageKey: "za5uSb27e-4z" },
     provider: { type: "string", storageKey: "sess-provider" },
     sessionId: { type: "string", storageKey: "HiIwekOgnTI8" },
