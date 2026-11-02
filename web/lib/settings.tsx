@@ -129,12 +129,21 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     }
   }, [store]);
 
+  // Warn before a reload or navigation drops unsaved settings.
+  const dirty = !!draft && JSON.stringify(draft) !== baseline;
+  useEffect(() => {
+    if (!dirty) return;
+    const onUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    addEventListener("beforeunload", onUnload);
+    return () => removeEventListener("beforeunload", onUnload);
+  }, [dirty]);
+
   const value = useMemo<SettingsValue>(() => ({
     store,
     loading: fetching && !store,
     draft,
     set: (key, v) => setDraft((d) => (d ? { ...d, [key]: v } : d)),
-    dirty: !!draft && JSON.stringify(draft) !== baseline,
+    dirty,
     saving,
     saveError,
     savedAt,

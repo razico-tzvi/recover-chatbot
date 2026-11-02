@@ -30,31 +30,49 @@ const BC_PERMISSIONS = [
 ];
 
 export const IntegrationsPage = () => {
-  const { store, draft, loading } = useSettings();
+  const { store, draft, loading, save, saving } = useSettings();
   const [open, setOpen] = useState<Id | null>(null);
   const [group, setGroup] = useState<"in" | "out">("in");
   const [results, setResults] = useState<Partial<Record<Id, TestResult>>>({});
 
   if (loading || !draft) return <Loading />;
 
+  // Saved = what the bot actually uses; the draft may hold typed, unsaved credentials.
+  const savedProvider = store?.llmProvider || "anthropic";
+  const saved: Record<Id, boolean> = {
+    anthropic: savedProvider === "anthropic" ? !!store?.llmModel && hasSecret(store, "llmApiKey") : !!store?.llmBaseUrl && !!store?.llmModel,
+    bigcommerce: true,
+    freshdesk: !!freshdeskHost(store?.freshdeskDomain) && hasSecret(store, "freshdeskApiKey"),
+    shipstation: hasSecret(store, "shipstationApiKey"),
+  };
   const connected: Record<Id, boolean> = {
     anthropic: draft.llmProvider === "anthropic" ? !!draft.llmModel && (hasSecret(store, "llmApiKey") || !!draft.llmApiKey) : !!draft.llmBaseUrl && !!draft.llmModel,
     bigcommerce: true,
     freshdesk: !!freshdeskHost(draft.freshdeskDomain) && (hasSecret(store, "freshdeskApiKey") || !!draft.freshdeskApiKey),
     shipstation: hasSecret(store, "shipstationApiKey") || !!draft.shipstationApiKey,
   };
+  const unsaved: Record<Id, boolean> = {
+    anthropic: !!draft.llmApiKey.trim() || draft.llmProvider !== savedProvider || draft.llmModel.trim() !== (store?.llmModel ?? "")
+      || draft.llmBaseUrl.trim() !== (store?.llmBaseUrl ?? "")
+      || draft.anthropicModels.crm !== (store?.anthropicModels?.crm ?? "") || draft.anthropicModels.analysis !== (store?.anthropicModels?.analysis ?? ""),
+    bigcommerce: false,
+    freshdesk: !!draft.freshdeskApiKey.trim() || draft.freshdeskDomain.trim() !== (store?.freshdeskDomain ?? ""),
+    shipstation: !!draft.shipstationApiKey.trim() || !!draft.shipstationApiSecret.trim(),
+  };
 
   const status = (id: Id): { text: string; tone: "good" | "warn" | "crit" } => {
     const r = results[id];
     if (id === "bigcommerce" && r?.missing?.length) return { text: `Connected · ${r.missing.length} permission${r.missing.length > 1 ? "s" : ""} missing`, tone: "warn" };
     if (r && !r.ok) return { text: "Test failed", tone: "crit" };
-    if (connected[id]) return { text: "Connected", tone: "good" };
+    if (unsaved[id]) return { text: connected[id] ? "Connected · unsaved" : "Unsaved changes", tone: "warn" };
+    if (saved[id]) return { text: "Connected", tone: "good" };
     return { text: "Setup needed", tone: "warn" };
   };
 
-  const inCount = TILES.filter((t) => connected[t.id]).length;
-  const shown = TILES.filter((t) => (group === "in") === connected[t.id]);
+  const inCount = TILES.filter((t) => saved[t.id]).length;
+  const shown = TILES.filter((t) => (group === "in") === saved[t.id]);
   const current = open && TILES.find((t) => t.id === open);
+  const pending = TILES.filter((t) => unsaved[t.id]);
 
   return (
     <>
@@ -62,6 +80,12 @@ export const IntegrationsPage = () => {
         BigCommerce connects with one click as an installed app. ShipStation and Freshdesk authenticate with API keys, so each panel
         tells you exactly where the key lives, then tests the connection. Credential changes are saved with Save settings.
       </div>
+      {pending.length > 0 && !current && (
+        <div className="alert warn row between">
+          <span>Not saved yet: {pending.map((t) => t.name).join(", ")}. The bot keeps using the old settings until you save.</span>
+          <Btn small primary loading={saving} onClick={save}>Save settings</Btn>
+        </div>
+      )}
       <div className="pills">
         <button type="button" className={group === "in" ? "pill on" : "pill"} onClick={() => setGroup("in")}>Integrated · {inCount}</button>
         <button type="button" className={group === "out" ? "pill on" : "pill"} onClick={() => setGroup("out")}>Not yet integrated · {TILES.length - inCount}</button>
@@ -71,7 +95,7 @@ export const IntegrationsPage = () => {
         {shown.map((t) => (
           <button type="button" key={t.id} className="tile" onClick={() => setOpen(t.id)}>
             <span className="mark" style={{ background: t.color }}>{t.letter}</span>
-            <span><b>{t.name}</b><span className="tstat">{connected[t.id] || results[t.id] ? status(t.id).text : "Not yet integrated"}</span></span>
+            <span><b>{t.name}</b><span className="tstat">{saved[t.id] || unsaved[t.id] || results[t.id] ? status(t.id).text : "Not yet integrated"}</span></span>
           </button>
         ))}
       </div>
@@ -80,6 +104,7 @@ export const IntegrationsPage = () => {
         <IntegrationModal
           tile={current}
           badge={<Tag tone={status(current.id).tone}>{status(current.id).text}</Tag>}
+          unsaved={unsaved[current.id]}
           onClose={() => setOpen(null)}
           result={results[current.id]}
           onResult={(r) => setResults((x) => ({ ...x, [current.id]: r }))}
@@ -89,16 +114,18 @@ export const IntegrationsPage = () => {
   );
 };
 
-function IntegrationModal({ tile, badge, onClose, result, onResult }: {
+function IntegrationModal({ tile, badge, unsaved, onClose, result, onResult }: {
   tile: (typeof TILES)[number];
   badge: React.ReactNode;
+  unsaved: boolean;
   onClose: () => void;
   result?: TestResult;
   onResult: (r: TestResult) => void;
 }) {
-  const { store, draft, set } = useSettings();
+  const { store, draft, set, save, saving, saveError } = useSettings();
   const d = draft as Draft;
   const [testing, setTesting] = useState(false);
+  const saveAndClose = async () => { if (await save()) onClose(); };
   const id = tile.id;
 
   const test = async () => {
@@ -144,7 +171,12 @@ function IntegrationModal({ tile, badge, onClose, result, onResult }: {
       badge={badge}
       sub={tile.powers}
       onClose={onClose}
-      footer={<Btn primary={id === "shipstation" && !hasSecret(store, "shipstationApiKey")} loading={testing} onClick={test}>{id === "bigcommerce" ? "Review permissions" : "Test connection"}</Btn>}
+      footer={
+        <>
+          <Btn loading={testing} onClick={test}>{id === "bigcommerce" ? "Review permissions" : "Test connection"}</Btn>
+          {id !== "bigcommerce" && <Btn primary loading={saving} disabled={!unsaved} onClick={saveAndClose}>Save</Btn>}
+        </>
+      }
     >
       {id === "anthropic" && (
         <div className="grid2">
@@ -221,6 +253,12 @@ function IntegrationModal({ tile, badge, onClose, result, onResult }: {
       )}
 
       {result && <Alert tone={result.ok ? "good" : "crit"}>{result.message}</Alert>}
+      {unsaved && (
+        <Alert tone="warn">
+          Not saved yet{result?.ok ? " — the test passed, but" : ":"} these credentials only take effect after you click Save.
+        </Alert>
+      )}
+      {saveError && <Alert tone="crit">{saveError}</Alert>}
     </Modal>
   );
 }
