@@ -35,3 +35,26 @@ export async function conversationRows(filter?: Record<string, unknown>) {
 export async function exportConversations(format: "csv" | "json", filter?: Record<string, unknown>) {
   downloadRows(`conversations-${stamp()}`, format, await conversationRows(filter));
 }
+
+// Freshdesk ticket history (agent public replies only), from the nightly sync.
+export async function historyRows() {
+  const rows = await fetchAll(api.crmHistory, { sort: { ticketUpdatedAt: "Descending" } }, 50000);
+  return rows.map((r: any) => ({ ticketId: r.ticketId, subject: r.subject || "", agentReply: r.answer || "", ticketUpdatedAt: r.ticketUpdatedAt }));
+}
+
+// Learning-mode feedback: each AI draft next to what the agent actually sent.
+export async function feedbackRows() {
+  const rows = await fetchAll(api.crmTicket, { sort: { createdAt: "Descending" } }, 50000);
+  return rows.map((r: any) => ({
+    ticketId: r.ticketId,
+    time: r.createdAt,
+    outcome: r.action,
+    confident: r.confident ?? "",
+    blockedTopic: r.blockedTopic || "",
+    subject: r.subject || "",
+    aiDraft: r.draft || "",
+    agentReply: r.finalReply || "",
+    keptWording: typeof r.similarity === "number" ? r.similarity : "",
+    model: r.model || "",
+  }));
+}

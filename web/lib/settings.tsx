@@ -3,8 +3,44 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { api } from "../api";
 import {
   DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_INCENTIVE_INSTRUCTIONS, DEFAULT_SAFEGUARDS_INSTRUCTIONS, DEFAULT_VOICE_TONE,
-  resolveBranding, resolveFeatures, resolveSafeguards, DEFAULT_SAFEGUARDS, DEFAULT_FEATURES,
+  resolveBranding, resolveFeatures, resolveSafeguards, resolveCrm, DEFAULT_SAFEGUARDS, DEFAULT_FEATURES,
 } from "../../api/lib/defaults";
+
+// CRM settings as edited in the form: tag and keyword lists are comma-separated text.
+export type CrmDraft = {
+  mode: "off" | "learning" | "live";
+  onlyTags: string;
+  skipTags: string;
+  draftTag: string;
+  answeredTag: string;
+  blockedTag: string;
+  signature: string;
+  blocklist: { topic: string; keywords: string; response: string }[];
+};
+
+function crmDraftFrom(store: any): CrmDraft {
+  const c = resolveCrm(store);
+  return {
+    mode: c.mode as CrmDraft["mode"],
+    onlyTags: c.onlyTags.join(", "),
+    skipTags: c.skipTags.join(", "),
+    draftTag: c.draftTag,
+    answeredTag: c.answeredTag,
+    blockedTag: c.blockedTag,
+    signature: c.signature,
+    blocklist: c.blocklist.map((b: any) => ({ topic: b.topic, keywords: b.keywords.join(", "), response: b.response })),
+  };
+}
+
+// Leaving "off" stamps enabledAt, so only tickets created from now on are touched.
+function crmSettingsFrom(store: any, d: CrmDraft) {
+  const saved = resolveCrm(store);
+  const split = (t: string) => t.split(",");
+  const enabledAt = d.mode !== "off" && saved.mode === "off" ? new Date().toISOString() : saved.enabledAt;
+  return resolveCrm({
+    crmSettings: { ...d, enabledAt, onlyTags: split(d.onlyTags), skipTags: split(d.skipTags) },
+  });
+}
 
 // Context blocks: a block left equal to its default is saved as "" so the
 // server keeps using the (possibly updated) built-in default.
@@ -37,6 +73,7 @@ export type Draft = {
   llmModel: string;
   anthropicModels: { crm: string; analysis: string };
   freshdeskDomain: string;
+  crm: CrmDraft;
 } & Record<ContextKey, string> & Record<SecretKey, string>;
 
 function draftFrom(store: any): Draft {
@@ -61,6 +98,7 @@ function draftFrom(store: any): Draft {
     llmModel: store?.llmModel ?? "",
     anthropicModels: { crm: store?.anthropicModels?.crm ?? "", analysis: store?.anthropicModels?.analysis ?? "" },
     freshdeskDomain: store?.freshdeskDomain ?? "",
+    crm: crmDraftFrom(store),
     llmApiKey: "",
     freshdeskApiKey: "",
     shipstationApiKey: "",
@@ -87,6 +125,7 @@ function toUpdate(store: any, d: Draft) {
     llmModel: d.llmModel.trim(),
     anthropicModels: d.anthropicModels,
     freshdeskDomain: d.freshdeskDomain.trim(),
+    crmSettings: crmSettingsFrom(store, d.crm),
   };
   for (const k of Object.keys(CONTEXT_DEFAULTS) as ContextKey[]) {
     const v = d[k].trim();

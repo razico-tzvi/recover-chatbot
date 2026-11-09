@@ -2,10 +2,6 @@ import { Card, Tag } from "../components/ui";
 
 // Tabs whose features ship in later phases of the Admin v2 build.
 const COPY: Record<string, { header: string; body: string }> = {
-  crm: {
-    header: "CRM ticket answering",
-    body: "Coming next: nightly ticket-history sync, Learning mode (drafts as private notes tagged ai-draft, with edits captured as feedback), tags, a topic blocklist with set responses, and the bot signature. Connect Freshdesk on the Integrations tab now — handoff tickets already use it.",
-  },
   analytics: {
     header: "Analytics",
     body: "Coming soon: overview (conversations, containment, ratings, AI cost), the sales funnel with direct vs. assisted conversion, incentive A/B results, support and safety numbers. Rate-limit hits, lockouts and flags are already being recorded.",

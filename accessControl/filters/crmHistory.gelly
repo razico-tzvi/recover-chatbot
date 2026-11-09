@@ -1,0 +1,3 @@
+filter ($session: Session) on CrmHistory [
+  where storeId == $session.bigcommerceStoreId
+]

@@ -88,6 +88,11 @@ setup (ggt dev + `stencil start` + the script tag in
   context blocks).
 - Tools, safeguards, handoff, admin tabs, required OAuth scopes and test status
   are documented in `docs/CHATBOT-TOOLS.md` — keep it updated when tools change.
+- `api/lib/crm.js` — CRM ticket answering (Freshdesk, phase 2): `crmPoll`
+  cron (5 min) drafts/answers new tickets, `crmSyncHistory` cron (nightly)
+  syncs agent replies. Only tickets created after the mode left Off are
+  touched. Don't run Check now / Live mode against a real helpdesk without
+  the store owner's OK — it posts notes/replies on customer tickets.
 - Back-in-stock is removed for now (tool, cron, admin list); the `stockAlert`
   model is kept.
 - `api/routes/GET-widget.js` — serves the widget; `?api=` and `?store=` query

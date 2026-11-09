@@ -12,8 +12,38 @@ per-store settings resolvers shared by the backend and the admin live in
 Admin v2 (spec: "Recover AI Chatbot - Admin v2 Requirements", ClickUp
 86eybafcf) is being built in phases. **Phase 1** (this doc) = 9-tab admin,
 context sources + exports, Integrations tab, feature toggles, safeguards + rate
-limiting. Phases 2–5 (Freshdesk ticket automation, Analytics + API, closing
-incentive, learning loop) show as "coming soon" tabs.
+limiting. **Phase 2** = CRM ticket answering (Freshdesk), below. Phases 3–5
+(Analytics + API, closing incentive, learning loop) show as "coming soon" tabs.
+
+## CRM ticket answering (Freshdesk, phase 2)
+
+Code: `api/lib/crm.js` (engine), `api/lib/llm.js` (non-streaming LLM call),
+`api/lib/integrations.js` (`freshdesk()` client), actions `crmPoll`,
+`crmSyncHistory`, `crmAdmin`; admin `web/routes/crm.tsx`. Settings are the
+store's `crmSettings` JSON (`resolveCrm` / `DEFAULT_CRM` in `defaults.js`);
+run state (cursors, last run, errors, history count) is `crmState`.
+
+| Piece | How it works |
+|---|---|
+| Modes | **Off** · **Learning** — every new ticket gets an AI draft as a *private note* tagged `ai-draft`; nothing reaches the customer · **Live** — confident answers go out as a public reply tagged `ai-answered`; low-confidence ones still become private drafts. |
+| Which tickets | `crmPoll` (cron `*/5 * * * *`) lists tickets updated since a cursor (`GET /api/v2/tickets?updated_since=…&order_by=updated_at`). A ticket is handled once (dedupe on `crmTicket`) if it is **open**, was **created after `enabledAt`** (stamped by the admin when the mode leaves Off — the backlog is never touched), has none of the *skip* tags (default `ai-handoff`, i.e. chat handoffs) or the bot's own tags, carries one of the *only* tags if any are set, and has no agent public reply yet. Max 10 tickets per store per run. |
+| Drafting | `draftReply`: `CRM_GUARDRAILS` (code, not editable) + voice & tone + refusal wording + FAQ + up to 3 similar synced past tickets (keyword overlap) + up to 3 recent agent corrections. The model returns JSON `{confident, reason, reply}`; the store's **signature** is appended in code. Model: Integrations › CRM model, else the chat model. |
+| Topic blocklist | `matchBlocklist` (whole words/phrases in subject + body). Matching tickets never get an AI-written answer: the **set response** is used instead (sent in Live, private note in Learning), or with no set response the ticket is only tagged `ai-blocked`. |
+| Feedback | Each draft gets `nextCheckAt`; `collectFeedback` (same cron) looks for the first agent public reply after the draft, stores it as `finalReply` with a word-level `similarity` (1 = sent unchanged). Rechecked hourly for 14 days. Drafts kept < 90% feed the "agents edited these" prompt section. |
+| History sync | `crmSyncHistory` (cron `0 7 * * *`, plus **Sync now**): resolved/closed tickets → `crmHistory` with subject + **agent public replies only** (no customer text, no private notes, no `ai-answered` tickets). First run looks back 90 days; ≤150 tickets per run, incremental cursor. |
+| Rate limits | Freshdesk plans allow as little as ~50 calls/min. A 429 with Retry-After ≤ 5 s is retried once; otherwise the run saves its cursor and stops — the poll resumes on the next tick; the history sync **schedules its own continuation** after Retry-After (≤ 20 per chain; the CRM tab shows "pausing… resumes around"). Long sleeps inside an action got it aborted in dev (`AbortError`), so the code never waits long. |
+| Errors | A failed ticket is recorded as `error`; **Retry** on the CRM tab reprocesses it. Tagging is best effort (stores with required custom fields may reject `PUT /tickets`). |
+
+Freshdesk calls: `GET /tickets`, `GET /tickets/{id}`, `GET /tickets/{id}/conversations`,
+`POST /tickets/{id}/notes` (private), `POST /tickets/{id}/reply` (Live only),
+`PUT /tickets/{id}` (tags). The API key's agent is the author of notes/replies.
+
+**CRM tab**: mode, last check / history sync status with **Check now** and
+**Sync now**, tag rules, signature, blocklist editor (saved with Save
+settings), recent-ticket log (outcome, kept-wording %, draft vs. agent reply,
+Retry), and **Try it** — drafts a reply to pasted text without posting.
+Context tab: Freshdesk history status/count + CSV/JSON export; Data exports:
+Freshdesk feedback (draft vs. sent).
 
 ## Feature toggles
 
@@ -134,8 +164,9 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
   are `encryptedString` fields and write-only in the UI.
 - **Features** (`web/routes/features.tsx`): a switch per feature; Closing
   incentive is shown but disabled until phase 4.
-- **CRM / Analytics / Learning / API**: "coming soon" panels
-  (`web/routes/comingSoon.tsx`). The CRM tab is titled "Freshdesk" once connected.
+- **CRM** (`web/routes/crm.tsx`): ticket answering, see above. Titled
+  "Freshdesk" once connected; a settings tab (shared Save).
+- **Analytics / Learning / API**: "coming soon" panels (`web/routes/comingSoon.tsx`).
 - **Conversations** (`web/routes/conversations.tsx`): All / Needs human /
   Flagged filters, CSV/JSON export of the filtered set (one row per message,
   incl. tools called), flagged banner and tools-per-reply in the transcript,
@@ -145,18 +176,44 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
 
 | Model | Change |
 |---|---|
-| `bigcommerce/store` | + `faq`, `handoffEmail`, `handoffWebhookUrl`; v2: `botName`, `widgetColor`, `greeting`, `suggestedQuestions` (json), `disclaimer`, `handoffDestination`, `features` (json), `safeguards` (json), `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `anthropicModels` (json), `freshdeskDomain`, `freshdeskApiKey`, `shipstationApiKey`, `shipstationApiSecret` (encrypted), `lastFlagAlertAt` |
+| `bigcommerce/store` | + `faq`, `handoffEmail`, `handoffWebhookUrl`; v2: `botName`, `widgetColor`, `greeting`, `suggestedQuestions` (json), `disclaimer`, `handoffDestination`, `features` (json), `safeguards` (json), `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `anthropicModels` (json), `freshdeskDomain`, `freshdeskApiKey`, `shipstationApiKey`, `shipstationApiSecret` (encrypted), `lastFlagAlertAt`; phase 2: `crmSettings`, `crmState` (json) |
 | `chatSession` | + `needsHuman` (default false), `handoffEmail`, `handoffSummary`, `handoffAt`; v2: `flagged`, `flagReason`, `flaggedAt` |
 | `chatMessage` | v2: + `ip` (user messages), `tools` (json, tools called for that reply) |
 | `stockAlert` | kept (feature removed for now) |
 | `safetyEvent` | new: `storeId`, `sessionId`, `ip`, `kind`, `detail`, `expiresAt` |
+| `crmTicket` | phase 2: `storeId`, `ticketId`, `subject`, `question`, `action` (drafted/replied/blocked/skipped/error), `reason`, `confident`, `draft`, `blockedTopic`, `model`, `finalReply`, `similarity`, `feedbackAt`, `nextCheckAt` |
+| `crmHistory` | phase 2: `storeId`, `ticketId`, `subject`, `answer` (agent public replies), `ticketUpdatedAt` |
 
 `accessControl/permissions.gadget.ts`: `bigcommerce-app-users` may **update**
-its own `chatSession` (Mark resolved), **read** its own `safetyEvent` rows
-(`accessControl/filters/safetyEvent.gelly`, scoped by
-`storeId == $session.bigcommerceStoreId`), and run the `getCatalog` and
+its own `chatSession` (Mark resolved) and run the `getCatalog` and
 `testIntegration` global actions (both resolve the store from
-`connections.bigcommerce.currentStoreHash`, never from params).
+`connections.bigcommerce.currentStoreHash`, never from params). Phase 2: **read**
+own `crmTicket` / `crmHistory` rows (`accessControl/filters/crm*.gelly`, scoped
+by `storeId == $session.bigcommerceStoreId`) and run `crmAdmin` (same store
+resolution). The admin doesn't read `safetyEvent`, so that role grant was
+dropped (the filter file is kept).
+
+## Verification — phase 2 CRM (2026-11-09)
+
+| Check | Result |
+|---|---|
+| `ggt dev` sync, `ggt problems` | ✅ none; `crmTicket` / `crmHistory` queryable in dev |
+| Mocked Freshdesk + LLM + DB run of `syncHistory` → `pollStore` → `collectFeedback` → Live poll | ✅ backlog and `ai-handoff` tickets ignored; draft posted as private note only; blocklisted ticket tagged, no AI text; cursor advances, second poll handles nothing; agent edit captured (similarity < 0.9); Live posts `/reply`; history keeps agent public replies only |
+| Unit checks: `resolveCrm`, `matchBlocklist` (punctuation, case), `parseDraft`, `similarity`, `toHtml` | ✅ |
+| `vite build`, TS (no new errors) | ✅ |
+| Staging control panel (Apps → AI Support, dev app 66240): CRM tab renders, titled "Freshdesk" | ✅ |
+| **Sync now** against `recoverinnovations.freshdesk.com` | ✅ after fixes — 165+ resolved tickets synced via self-scheduled continuations; status/notice refresh live |
+| **Try it** (preview, nothing posted) | ✅ grounded in the FAQ (30-day returns, 5–7 day refunds), marked confident |
+| Save signature + blocklist topic → `crmSettings` round-trip (keywords normalized, mode Off keeps `enabledAt` empty); reverted afterwards | ✅ |
+| Context tab: Freshdesk history "Synced", count, CSV/JSON | ✅ (rendered; downloads not clicked) |
+| Check now / Learning / Live against the real helpdesk | not run — it would post notes/replies on real customer tickets; covered by the mocked run |
+
+Fixed during staging verification: (1) the first sync hit Freshdesk's rate
+limit after ~29 tickets; in-action waits then got the job aborted → replaced
+with saved cursor + scheduled continuation; (2) the CRM status block showed
+stale counts/errors after a background run → it now reads `crmState` on its
+own and refreshes every 5 s for 2 min after Check/Sync; (3) **Sync now**
+while a continuation is pending no longer starts a parallel chain.
 
 ## Required BigCommerce OAuth scopes
 

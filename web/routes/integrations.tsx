@@ -238,7 +238,7 @@ function IntegrationModal({ tile, badge, unsaved, onClose, result, onResult }: {
             </Field>
             {secretInput("freshdeskApiKey", "API key")}
           </div>
-          <p className="hint">The key lives in Freshdesk under Profile settings › View API key. Ticket history sync and drafting arrive with the CRM tab; today the connection powers handoff tickets.</p>
+          <p className="hint">The key lives in Freshdesk under Profile settings › View API key. Once connected it powers handoff tickets, the nightly ticket-history sync and ticket drafting/answering on the CRM tab.</p>
         </>
       )}
 

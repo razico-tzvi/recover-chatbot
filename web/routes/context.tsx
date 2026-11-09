@@ -4,7 +4,7 @@ import { GUARDRAILS } from "../../api/lib/defaults";
 import { freshdeskConnected } from "../../api/lib/integrations";
 import { CONTEXT_DEFAULTS, useSettings, type ContextKey } from "../lib/settings";
 import { download, downloadRows, stamp, textBlockRows } from "../lib/download";
-import { exportConversations } from "../lib/exports";
+import { exportConversations, feedbackRows, historyRows } from "../lib/exports";
 import { Alert, Btn, Card, Loading, Tag } from "../components/ui";
 
 type Source = {
@@ -71,6 +71,8 @@ export const ContextPage = () => {
         else downloadRows(`${s.id}-${stamp()}`, "csv", textBlockRows(text), ["topic", "content"]);
       } else if (s.id === "catalog") {
         downloadRows(`catalog-${stamp()}`, format, await catalogProducts());
+      } else if (s.id === "freshdesk") {
+        downloadRows(`freshdesk-history-${stamp()}`, format, await historyRows());
       }
     });
 
@@ -84,7 +86,7 @@ export const ContextPage = () => {
           generalGuidelines: savedBlock(store, "systemPrompt"),
           faq: savedBlock(store, "faq"),
           productCatalog: await catalogProducts(),
-          freshdeskTicketHistory: null, // arrives with the Freshdesk sync
+          freshdeskTicketHistory: await historyRows(),
           salesPlaybook: null, // arrives with the learning loop
           incentiveInstructions: savedBlock(store, "incentiveInstructions"),
           safeguardsInstructions: savedBlock(store, "safeguardsInstructions"),
@@ -100,7 +102,11 @@ export const ContextPage = () => {
       return <Tag tone="good">{custom ? "Active · customized" : "Active · default"}</Tag>;
     }
     if (s.id === "catalog") return catalog.error ? <Tag tone="crit">Error</Tag> : <Tag tone="good">Live</Tag>;
-    if (s.id === "freshdesk") return <Tag>{freshdeskConnected(store) ? "Sync not built yet" : "Not connected"}</Tag>;
+    if (s.id === "freshdesk") {
+      if (!freshdeskConnected(store)) return <Tag>Not connected</Tag>;
+      if (store?.crmState?.lastSyncError) return <Tag tone="crit">Sync error</Tag>;
+      return store?.crmState?.lastSyncAt ? <Tag tone="good">Synced</Tag> : <Tag tone="warn">Waiting for first sync</Tag>;
+    }
     return <Tag>Not started</Tag>;
   };
 
@@ -109,6 +115,9 @@ export const ContextPage = () => {
     if (s.id === "faq") parts.push(`${draft.faq.split(/\n(?=## )/).filter((x) => x.trim()).length} topics`);
     else if (s.field) parts.push(`${draft[s.field].length.toLocaleString()} chars`);
     if (s.field && store?.updatedAt) parts.push(`saved ${new Date(store.updatedAt).toLocaleDateString()}`);
+    if (s.id === "freshdesk" && store?.crmState?.lastSyncAt) {
+      parts.push(`${(store.crmState.historyCount ?? 0).toLocaleString()} tickets`, `synced ${new Date(store.crmState.lastSyncAt).toLocaleDateString()}`);
+    }
     if (s.id === "catalog") {
       if (catalog.loading) parts.push("counting…");
       else if (catalog.count != null) parts.push(`${catalog.count.toLocaleString()} products`);
@@ -142,7 +151,8 @@ export const ContextPage = () => {
         </>
       );
     }
-    return <span className="hint">{s.id === "freshdesk" ? "Coming with the Freshdesk integration" : "Coming with the learning loop"}</span>;
+    if (s.id === "freshdesk") return freshdeskConnected(store) ? exportBtns(s) : <span className="hint">Connect Freshdesk under Integrations</span>;
+    return <span className="hint">Coming with the learning loop</span>;
   };
 
   return (
@@ -196,7 +206,8 @@ export const ContextPage = () => {
         </div>
         <div className="srcrow">
           <div className="grow"><b>Freshdesk feedback</b><div className="meta">Draft vs sent diffs from the learning phase</div></div>
-          <span className="hint">Arrives with the Freshdesk integration</span>
+          <Btn small loading={busy === "fb-csv"} onClick={() => run("fb-csv", async () => downloadRows(`freshdesk-feedback-${stamp()}`, "csv", await feedbackRows()))}>CSV</Btn>
+          <Btn small loading={busy === "fb-json"} onClick={() => run("fb-json", async () => downloadRows(`freshdesk-feedback-${stamp()}`, "json", await feedbackRows()))}>JSON</Btn>
         </div>
       </Card>
     </>

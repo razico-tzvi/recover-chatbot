@@ -49,13 +49,19 @@ export const permissions: GadgetPermissions = {
             },
           },
         },
-        safetyEvent: {
+        crmHistory: {
           read: {
-            filter: "accessControl/filters/safetyEvent.gelly",
+            filter: "accessControl/filters/crmHistory.gelly",
+          },
+        },
+        crmTicket: {
+          read: {
+            filter: "accessControl/filters/crmTicket.gelly",
           },
         },
       },
       actions: {
+        crmAdmin: true,
         getCatalog: true,
         testIntegration: true,
       },

@@ -16,6 +16,7 @@ import { IntegrationsPage } from "../routes/integrations";
 import { FeaturesPage } from "../routes/features";
 import { ConversationsPage } from "../routes/conversations";
 import { ComingSoonPage } from "../routes/comingSoon";
+import { CrmPage } from "../routes/crm";
 import { freshdeskHost } from "../../api/lib/integrations";
 import { Alert, Btn } from "./ui";
 
@@ -25,7 +26,7 @@ const TABS = [
   { id: "context", path: "/context", title: "Context", settings: true },
   { id: "integrations", path: "/integrations", title: "Integrations", settings: true },
   { id: "features", path: "/features", title: "Features", settings: true },
-  { id: "crm", path: "/crm", title: "CRM" },
+  { id: "crm", path: "/crm", title: "CRM", settings: true },
   { id: "analytics", path: "/analytics", title: "Analytics" },
   { id: "conversations", path: "/conversations", title: "Conversations" },
   { id: "learning", path: "/learning", title: "Learning" },
@@ -40,7 +41,7 @@ function App() {
         <Route path="context" element={<ContextPage />} />
         <Route path="integrations" element={<IntegrationsPage />} />
         <Route path="features" element={<FeaturesPage />} />
-        <Route path="crm" element={<ComingSoonPage tab="crm" />} />
+        <Route path="crm" element={<CrmPage />} />
         <Route path="analytics" element={<ComingSoonPage tab="analytics" />} />
         <Route path="conversations" element={<ConversationsPage />} />
         <Route path="learning" element={<ComingSoonPage tab="learning" />} />

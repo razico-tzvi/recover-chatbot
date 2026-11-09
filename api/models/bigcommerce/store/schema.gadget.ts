@@ -12,6 +12,8 @@ export const schema: GadgetModel = {
       storageKey: "store-anthropicModels",
     },
     botName: { type: "string", storageKey: "store-botName" },
+    crmSettings: { type: "json", storageKey: "store-crmSettings" },
+    crmState: { type: "json", storageKey: "store-crmState" },
     disclaimer: { type: "string", storageKey: "store-disclaimer" },
     faq: { type: "string", storageKey: "store-faq" },
     features: { type: "json", storageKey: "store-features" },
