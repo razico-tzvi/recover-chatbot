@@ -38,7 +38,7 @@ const num = (v: number) => v.toLocaleString();
 const compact = (v: number) => new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(v);
 const usd = (v: number | null) =>
   v == null ? "—" : new Intl.NumberFormat(undefined, { style: "currency", currency: "USD", maximumFractionDigits: v < 1 ? 3 : 2 }).format(v);
-function money(byCurrency: Record<string, number>) {
+export function money(byCurrency: Record<string, number>) {
   const parts = Object.entries(byCurrency).filter(([, v]) => v > 0);
   if (!parts.length) return "—";
   return parts

@@ -18,6 +18,7 @@ import { ConversationsPage } from "../routes/conversations";
 import { AnalyticsPage } from "../routes/analytics";
 import { ComingSoonPage } from "../routes/comingSoon";
 import { CrmPage } from "../routes/crm";
+import { LearningPage } from "../routes/learning";
 import { freshdeskHost } from "../../api/lib/integrations";
 import { Alert, Btn } from "./ui";
 
@@ -45,7 +46,7 @@ function App() {
         <Route path="crm" element={<CrmPage />} />
         <Route path="analytics" element={<AnalyticsPage />} />
         <Route path="conversations" element={<ConversationsPage />} />
-        <Route path="learning" element={<ComingSoonPage tab="learning" />} />
+        <Route path="learning" element={<LearningPage />} />
         <Route path="api" element={<ComingSoonPage tab="api" />} />
         <Route path="*" element={<Error404 />} />
       </Route>

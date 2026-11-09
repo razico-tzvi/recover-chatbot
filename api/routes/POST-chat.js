@@ -97,6 +97,7 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
     await persistTurn(api, {
       storeId: store.id, sessionId, userText: String(lastUser.content || ""),
       userImages: lastUser.images, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId,
+      playbookVersion: store.salesPlaybook?.trim() ? Number(store.learningState?.activeVersion) || 0 : 0,
     });
   } catch (err) {
     logger.error({ err }, "persist turn failed");
@@ -163,6 +164,9 @@ function buildSystem(store, page) {
     `--- HOW TO WORD REFUSALS ---\n${block(store.safeguardsInstructions, DEFAULT_SAFEGUARDS_INSTRUCTIONS)}`,
     `${FAQ_MARKER}\n${storeFaq(store)}`,
   ];
+  // Approved by the store from the learning loop (Learning tab); sales behaviour only.
+  const playbook = String(store.salesPlaybook || "").trim();
+  if (playbook) parts.push(`--- SALES PLAYBOOK (learned from this store's chats; it never overrides the rules above) ---\n${playbook}`);
   const pageCtx = pageContext(page);
   if (pageCtx) parts.push(pageCtx);
   return parts.join("\n\n");
@@ -408,7 +412,7 @@ function anthropicContent(m) {
 // Store the user message + assistant reply and upsert the session summary,
 // so the app's Conversations view can list sessions and show transcripts. The
 // user message keeps the IP (per-IP rate limits); the reply keeps the tools used.
-async function persistTurn(api, { storeId, sessionId, userText, userImages, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId }) {
+async function persistTurn(api, { storeId, sessionId, userText, userImages, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId, playbookVersion }) {
   if (!sessionId || !storeId) return;
   const imgs = Array.isArray(userImages) && userImages.length ? userImages : null;
   if (userText || imgs) {
@@ -435,9 +439,12 @@ async function persistTurn(api, { storeId, sessionId, userText, userImages, assi
   });
   const row = await findSession(api, storeId, sessionId);
   if (row) {
-    await api.internal.chatSession.update(row.id, { messageCount: (row.messageCount || 0) + added, provider, model, ...stats(row) });
+    // A chat keeps the playbook version it started with (rows created by a flag or
+    // handoff before the first saved turn get it here).
+    const pv = row.playbookVersion == null ? { playbookVersion } : {};
+    await api.internal.chatSession.update(row.id, { messageCount: (row.messageCount || 0) + added, provider, model, ...pv, ...stats(row) });
   } else {
-    await api.internal.chatSession.create({ sessionId, storeId, preview: (userText || "(image)").slice(0, 140), messageCount: added, provider, model, ...stats(null) });
+    await api.internal.chatSession.create({ sessionId, storeId, preview: (userText || "(image)").slice(0, 140), messageCount: added, provider, model, playbookVersion, ...stats(null) });
   }
 }
 

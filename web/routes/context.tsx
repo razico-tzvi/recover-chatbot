@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import { useNavigate } from "react-router";
 import { api } from "../api";
 import { GUARDRAILS } from "../../api/lib/defaults";
 import { freshdeskConnected } from "../../api/lib/integrations";
@@ -35,6 +36,7 @@ export const ContextPage = () => {
   const [busy, setBusy] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [showGuardrails, setShowGuardrails] = useState(false);
+  const navigate = useNavigate();
 
   const loadCatalogCount = async () => {
     setCatalog((c) => ({ ...c, loading: true, error: undefined }));
@@ -73,6 +75,10 @@ export const ContextPage = () => {
         downloadRows(`catalog-${stamp()}`, format, await catalogProducts());
       } else if (s.id === "freshdesk") {
         downloadRows(`freshdesk-history-${stamp()}`, format, await historyRows());
+      } else if (s.id === "playbook") {
+        const version = store?.learningState?.activeVersion ?? null;
+        if (format === "json") download(`playbook-${stamp()}.json`, JSON.stringify({ source: s.name, version, content: store.salesPlaybook }, null, 2), "application/json");
+        else downloadRows(`playbook-${stamp()}`, "csv", textBlockRows(store.salesPlaybook), ["topic", "content"]);
       }
     });
 
@@ -87,7 +93,7 @@ export const ContextPage = () => {
           faq: savedBlock(store, "faq"),
           productCatalog: await catalogProducts(),
           freshdeskTicketHistory: await historyRows(),
-          salesPlaybook: null, // arrives with the learning loop
+          salesPlaybook: store?.salesPlaybook?.trim() ? { version: store?.learningState?.activeVersion ?? null, content: store.salesPlaybook } : null,
           incentiveInstructions: savedBlock(store, "incentiveInstructions"),
           safeguardsInstructions: savedBlock(store, "safeguardsInstructions"),
           voiceTone: savedBlock(store, "voiceTone"),
@@ -107,6 +113,9 @@ export const ContextPage = () => {
       if (store?.crmState?.lastSyncError) return <Tag tone="crit">Sync error</Tag>;
       return store?.crmState?.lastSyncAt ? <Tag tone="good">Synced</Tag> : <Tag tone="warn">Waiting for first sync</Tag>;
     }
+    if (s.id === "playbook") {
+      return store?.salesPlaybook?.trim() ? <Tag tone="good">{`Active · v${store?.learningState?.activeVersion ?? "?"}`}</Tag> : <Tag>No version live</Tag>;
+    }
     return <Tag>Not started</Tag>;
   };
 
@@ -123,6 +132,7 @@ export const ContextPage = () => {
       else if (catalog.count != null) parts.push(`${catalog.count.toLocaleString()} products`);
       if (catalog.fetchedAt) parts.push(`counted ${new Date(catalog.fetchedAt).toLocaleTimeString()}`);
     }
+    if (s.id === "playbook" && store?.salesPlaybook?.trim()) parts.push(`${store.salesPlaybook.length.toLocaleString()} chars`);
     if (s.note) parts.push(s.note);
     return parts.join(" · ");
   };
@@ -152,7 +162,15 @@ export const ContextPage = () => {
       );
     }
     if (s.id === "freshdesk") return freshdeskConnected(store) ? exportBtns(s) : <span className="hint">Connect Freshdesk under Integrations</span>;
-    return <span className="hint">Coming with the learning loop</span>;
+    if (s.id === "playbook") {
+      return (
+        <>
+          <Btn small onClick={() => navigate("/learning")}>Manage</Btn>
+          {store?.salesPlaybook?.trim() ? exportBtns(s) : null}
+        </>
+      );
+    }
+    return null;
   };
 
   return (

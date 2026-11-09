@@ -51,6 +51,14 @@ export const schema: GadgetModel = {
       includeTime: true,
       storageKey: "store-lastFlagAlertAt",
     },
+    learningSettings: {
+      type: "json",
+      storageKey: "store-learningSettings",
+    },
+    learningState: {
+      type: "json",
+      storageKey: "store-learningState",
+    },
     llmApiKey: { type: "string", storageKey: "store-llmApiKey" },
     llmBaseUrl: { type: "string", storageKey: "store-llmBaseUrl" },
     llmModel: { type: "string", storageKey: "store-llmModel" },
@@ -59,6 +67,10 @@ export const schema: GadgetModel = {
     safeguardsInstructions: {
       type: "string",
       storageKey: "store-safeguardsInstructions",
+    },
+    salesPlaybook: {
+      type: "string",
+      storageKey: "store-salesPlaybook",
     },
     shipstationApiKey: {
       type: "encryptedString",

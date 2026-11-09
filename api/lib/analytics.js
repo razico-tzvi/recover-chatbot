@@ -109,7 +109,7 @@ async function attributeBatch(api, store, orders) {
 
 const MAX_SESSIONS = 20000;
 
-async function findAll(model, filter, select) {
+export async function findAll(model, filter, select) {
   const rows = [];
   let page = await model.findMany({ filter, select, first: PAGE });
   for (;;) {

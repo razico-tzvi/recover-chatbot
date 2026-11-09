@@ -55,6 +55,10 @@ export const schema: GadgetModel = {
     orderId: { type: "number", storageKey: "sess-orderId" },
     orderTotal: { type: "number", storageKey: "sess-orderTotal" },
     outputTokens: { type: "number", storageKey: "sess-outputTokens" },
+    playbookVersion: {
+      type: "number",
+      storageKey: "sess-playbookVersion",
+    },
     preview: { type: "string", storageKey: "za5uSb27e-4z" },
     productsShown: {
       type: "boolean",

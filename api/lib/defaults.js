@@ -236,6 +236,35 @@ export function matchBlocklist(text, blocklist) {
   return null;
 }
 
+// ─────────────────────────── sales learning loop ───────────────────────────
+
+// The learning loop (api/lib/learning.js) proposes a new sales playbook version
+// once enough settled conversations have built up since the last proposal. A
+// conversation is "settled" when its outcome is final: it converted, or its
+// assisted-conversion window (ASSISTED_WINDOW_DAYS) has passed with no order.
+// Proposals never go live on their own — an admin approves them.
+export const DEFAULT_LEARNING = {
+  auto: true, // daily check proposes a version when the thresholds are met
+  minSettled: 250, // settled conversations since the last proposal
+  minConversions: 25, // of which converted (direct or assisted)
+};
+
+const LEARNING_LIMITS = { minSettled: [20, 100000], minConversions: [5, 10000] };
+
+export function resolveLearning(store) {
+  const s = store?.learningSettings && typeof store.learningSettings === "object" ? store.learningSettings : {};
+  const out = { ...DEFAULT_LEARNING };
+  if (typeof s.auto === "boolean") out.auto = s.auto;
+  for (const [k, [min, max]] of Object.entries(LEARNING_LIMITS)) {
+    const n = Math.floor(Number(s[k]));
+    if (Number.isFinite(n) && n > 0) out[k] = Math.min(max, Math.max(min, n));
+  }
+  return out;
+}
+
+// Hard cap on a playbook's length, so it can't crowd out the rest of the prompt.
+export const PLAYBOOK_MAX_CHARS = 6000;
+
 // ─────────────────────────── models ───────────────────────────
 
 export const CLAUDE_MODELS = [

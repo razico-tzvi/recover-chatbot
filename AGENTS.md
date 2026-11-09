@@ -97,6 +97,12 @@ setup (ggt dev + `stencil start` + the script tag in
   per store; `syncOrders` cron (hourly) credits BigCommerce orders to chats by
   cart id (direct = bot-built cart, assisted = shopper's own cart within 7 days).
   Token cost uses `MODEL_PRICES` in `defaults.js` — add new models there.
+- `api/lib/learning.js` — Learning tab (sales learning loop): `learningLoop`
+  cron (daily) proposes a `salesPlaybook` version once the window since the
+  last proposal has 250 settled chats / 25 conversions (editable); an admin
+  approves (optionally edited), rejects or rolls back in `learningAdmin`. The
+  live text is `store.salesPlaybook` (appended by `buildSystem`); each chat is
+  stamped with `chatSession.playbookVersion` for per-version conversion.
 - Back-in-stock is removed for now (tool, cron, admin list); the `stockAlert`
   model is kept.
 - `api/routes/GET-widget.js` — serves the widget; `?api=` and `?store=` query

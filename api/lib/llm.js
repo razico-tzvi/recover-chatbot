@@ -1,4 +1,5 @@
-// Non-streaming, tool-less LLM call for background jobs (CRM ticket drafting).
+// Non-streaming, tool-less LLM call for background jobs (CRM ticket drafting,
+// the sales learning loop).
 // Uses the store's Integrations settings: Anthropic in production; the
 // OpenAI-compatible endpoint only outside production (same rule as POST /chat).
 
@@ -14,13 +15,13 @@ export function llmConfig(store, role) {
 }
 
 // Returns { text, truncated } — truncated when the output hit maxTokens.
-export async function complete(cfg, { system, user, maxTokens = 2000 }) {
+export async function complete(cfg, { system, user, maxTokens = 2000, timeoutMs = 90_000 }) {
   if (cfg.provider === "anthropic") {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": cfg.apiKey, "anthropic-version": "2023-06-01" },
       body: JSON.stringify({ model: cfg.model, max_tokens: maxTokens, system, messages: [{ role: "user", content: user }] }),
-      signal: AbortSignal.timeout(90_000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!res.ok) throw new Error(`Anthropic ${res.status}`);
     const data = await res.json();
@@ -31,7 +32,7 @@ export async function complete(cfg, { system, user, maxTokens = 2000 }) {
     method: "POST",
     headers: { "Content-Type": "application/json", ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}) },
     body: JSON.stringify({ model: cfg.model, max_tokens: maxTokens, messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
-    signal: AbortSignal.timeout(90_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) throw new Error(`LLM ${res.status}`);
   const data = await res.json();

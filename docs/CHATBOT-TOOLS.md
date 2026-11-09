@@ -13,8 +13,8 @@ Admin v2 (spec: "Recover AI Chatbot - Admin v2 Requirements", ClickUp
 86eybafcf) is being built in phases. **Phase 1** (this doc) = 9-tab admin,
 context sources + exports, Integrations tab, feature toggles, safeguards + rate
 limiting. **Phase 2** = CRM ticket answering (Freshdesk), below. **Phase 3a** =
-Analytics tab, below. The API tab, closing incentive and learning loop (rest of
-phases 3–5) show as "coming soon".
+Analytics tab, below. **Learning** = the sales learning loop, below. The API
+tab and closing incentive show as "coming soon".
 
 ## Analytics (phase 3a)
 
@@ -42,6 +42,27 @@ keeps its first conversion (`conversion`, `orderId`, `orderTotal`,
 sync for the current store. Ranges: 7 / 30 / 90 days, daily buckets in UTC,
 CSV export of the daily rows, table view of the chart. Incentive A/B results
 are a placeholder until the closing incentive ships.
+
+## Sales learning loop (Learning tab)
+
+Code: `api/lib/learning.js`, `api/actions/learningLoop.ts` (cron `41 6 * * *`,
+daily), `api/actions/learningAdmin.ts` (tab operations, current store only),
+`web/routes/learning.tsx`. Settings resolver `resolveLearning` + `DEFAULT_LEARNING`
+in `defaults.js`.
+
+| What | How |
+|---|---|
+| Settled conversation | `messageCount > 0` and its outcome is final: it converted (direct/assisted, from `syncOrders`) **or** its last activity is older than `ASSISTED_WINDOW_DAYS` (7) with no order |
+| Window | conversations created since the last proposal (`learningState.cursor`, set when a proposal is written); the first window starts at the first chat |
+| Trigger | daily check, when **auto** is on, no proposal is pending, and the window has ≥ `minSettled` (default 250) settled conversations with ≥ `minConversions` (default 25) conversions. Both thresholds and auto are editable on the tab (clamped 20+/5+) |
+| Run analysis now | queues `learningLoop` with `force` for this store; skips the thresholds but still needs ≥ 10 settled / 2 converted (`MANUAL_MIN`) |
+| Analysis | the store's **analysis** model (`anthropicModels.analysis`, else the chat model). Reads the newest 30 converted and 30 non-converted settled chats (non-converted ones that showed products first), transcripts clipped, plus the live playbook. Returns `{playbook, rationale, changes}`; the prompt allows only sales *behaviour* (no product facts, prices, codes, promises, personal data, nothing against the guardrails), max `PLAYBOOK_MAX_CHARS` (6000) |
+| Versions | `salesPlaybook` rows: `proposed` → `active` → `retired`, or `rejected`. Nothing goes live without **Approve** (the text can be edited first, `edited: true`). **Restore** re-activates a retired version (rollback); **Turn off** runs with none |
+| Live text | the active version's text is copied to `store.salesPlaybook`; `buildSystem` appends it as `--- SALES PLAYBOOK … ---` after the FAQ |
+| Per-version conversion | each `chatSession` is stamped with `playbookVersion` (the live version when it started; 0/unset = no playbook, the baseline). The tab shows chats, settled, orders, conversion rate (conversions ÷ settled) and revenue per version, exportable as CSV/JSON |
+
+The Context tab's **Sales playbook** source shows the live version, exports it
+(CSV/JSON, and in Export all) and links to the Learning tab.
 
 ## CRM ticket answering (Freshdesk, phase 2)
 
@@ -160,7 +181,8 @@ the Stencil add-to-cart form (`[data-cart-item-add] input[name="product_id"]`).
 `buildSystem(store, page)` = bot name + `GUARDRAILS` + general guidelines
 (`systemPrompt`, default `DEFAULT_GUIDELINES`) + voice & tone (`voiceTone`) +
 refusal wording (`safeguardsInstructions`) + `--- STORE POLICIES & FAQ ---` +
-FAQ (`faq`) + page context. An empty field ⇒ its built-in default; the admin
+FAQ (`faq`) + the approved sales playbook (`salesPlaybook`, Learning tab) +
+page context. An empty field ⇒ its built-in default; the admin
 saves "" when a block equals the default. `incentiveInstructions` is stored now
 and used once the closing incentive ships. Prompts saved before the FAQ became
 its own field have the inline FAQ stripped at the marker.
@@ -195,7 +217,8 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
 - **CRM** (`web/routes/crm.tsx`): ticket answering, see above. Titled
   "Freshdesk" once connected; a settings tab (shared Save).
 - **Analytics** (`web/routes/analytics.tsx`): see Analytics above.
-- **Learning / API**: "coming soon" panels (`web/routes/comingSoon.tsx`).
+- **Learning** (`web/routes/learning.tsx`): see Sales learning loop above.
+- **API**: "coming soon" panel (`web/routes/comingSoon.tsx`).
 - **Conversations** (`web/routes/conversations.tsx`): All / Needs human /
   Flagged filters, CSV/JSON export of the filtered set (one row per message,
   incl. tools called), flagged banner and tools-per-reply in the transcript,
@@ -205,12 +228,13 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
 
 | Model | Change |
 |---|---|
-| `bigcommerce/store` | + `faq`, `handoffEmail`, `handoffWebhookUrl`; v2: `botName`, `widgetColor`, `greeting`, `suggestedQuestions` (json), `disclaimer`, `handoffDestination`, `features` (json), `safeguards` (json), `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `anthropicModels` (json), `freshdeskDomain`, `freshdeskApiKey`, `shipstationApiKey`, `shipstationApiSecret` (encrypted), `lastFlagAlertAt`; phase 2: `crmSettings`, `crmState` (json); phase 3a: `analyticsState` (json: `ordersCursor`, `ordersSyncedAt`) |
-| `chatSession` | + `needsHuman` (default false), `handoffEmail`, `handoffSummary`, `handoffAt`; v2: `flagged`, `flagReason`, `flaggedAt`; phase 3a: `inputTokens`, `outputTokens`, `costUsd`, `productsShown`, `addedToCart`, `storefrontCartId`, `rating`, `ratingAt`, `conversion` (direct/assisted), `orderId`, `orderTotal`, `orderCurrency`, `convertedAt` |
+| `bigcommerce/store` | + `faq`, `handoffEmail`, `handoffWebhookUrl`; v2: `botName`, `widgetColor`, `greeting`, `suggestedQuestions` (json), `disclaimer`, `handoffDestination`, `features` (json), `safeguards` (json), `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `anthropicModels` (json), `freshdeskDomain`, `freshdeskApiKey`, `shipstationApiKey`, `shipstationApiSecret` (encrypted), `lastFlagAlertAt`; phase 2: `crmSettings`, `crmState` (json); phase 3a: `analyticsState` (json: `ordersCursor`, `ordersSyncedAt`); learning: `learningSettings` (json: `auto`, `minSettled`, `minConversions`), `learningState` (json: `cursor`, `activeVersion`, `lastCheckAt`, `lastRunAt`, `lastRunError`, `running`), `salesPlaybook` (live text) |
+| `chatSession` | + `needsHuman` (default false), `handoffEmail`, `handoffSummary`, `handoffAt`; v2: `flagged`, `flagReason`, `flaggedAt`; phase 3a: `inputTokens`, `outputTokens`, `costUsd`, `productsShown`, `addedToCart`, `storefrontCartId`, `rating`, `ratingAt`, `conversion` (direct/assisted), `orderId`, `orderTotal`, `orderCurrency`, `convertedAt`; learning: `playbookVersion` |
 | `chatMessage` | v2: + `ip` (user messages), `tools` (json, tools called for that reply) |
 | `stockAlert` | kept (feature removed for now) |
 | `safetyEvent` | new: `storeId`, `sessionId`, `ip`, `kind`, `detail`, `expiresAt` |
 | `crmTicket` | phase 2: `storeId`, `ticketId`, `subject`, `question`, `action` (drafted/replied/blocked/skipped/error), `reason`, `confident`, `draft`, `blockedTopic`, `model`, `finalReply`, `similarity`, `feedbackAt`, `nextCheckAt` |
+| `salesPlaybook` | learning: `storeId`, `version`, `status` (proposed/active/retired/rejected), `content`, `rationale`, `changeSummary` (json; not `changes`, which `GadgetRecord#changes()` shadows), `basedOn` (json: window, counts, sample sizes), `model`, `trigger` (auto/manual), `edited`, `decidedAt`, `activatedAt`, `retiredAt` |
 | `crmHistory` | phase 2: `storeId`, `ticketId`, `subject`, `answer` (agent public replies), `ticketUpdatedAt` |
 
 `accessControl/permissions.gadget.ts`: `bigcommerce-app-users` may **update**
@@ -221,7 +245,9 @@ own `crmTicket` / `crmHistory` rows (`accessControl/filters/crm*.gelly`, scoped
 by `storeId == $session.bigcommerceStoreId`) and run `crmAdmin` (same store
 resolution). The admin doesn't read `safetyEvent`, so that role grant was
 dropped (the filter file is kept). Phase 3a: run `getAnalytics` (same store
-resolution; it reads `safetyEvent` / `crmTicket` server-side).
+resolution; it reads `safetyEvent` / `crmTicket` server-side). Learning: run
+`learningAdmin` (same store resolution; `salesPlaybook` rows are only read
+server-side, so there is no role grant on that model).
 
 ## Verification — phase 2 CRM (2026-11-09)
 
@@ -262,6 +288,34 @@ Test leftovers: Freshdesk tickets #122542–#122544 (subjects start "Chat
 handoff", bodies "[TEST - please ignore]") are still open and need closing by
 an agent; #122542 carries the malformed raw-JSON note from before fix (5).
 Dev DB: chat sessions `crm-test-*` and their `crmTicket` rows.
+
+## Verification — Learning tab (2026-11-09, dev env, staging store `a7gc2spzm0`)
+
+Synced with `ggt push` (`ggt problems`: none); admin checked in the staging
+control panel (dev app 66240). Test data: 13 real chats via dev `POST /chat`
+(sessions `learn-test-*`), 8 marked converted with fake order ids 990001–990008
+via `ggt eval -w` (stand-in for `syncOrders`). All test rows, both playbook
+versions and the store's learning fields were deleted afterwards.
+
+| Check | Result |
+|---|---|
+| Mocked-DB unit run of `api/lib/learning.js` | ✅ thresholds skip, forced run (analysis model, both transcript sides), pending/min-data blocks, approve with edits, rollback, turn off, reject, per-version stats |
+| Tab renders with live data; Run disabled below `MANUAL_MIN` with hint | ✅ |
+| New chats stamped `playbookVersion: 0` with no playbook live | ✅ |
+| **Run analysis now** → queued `learningLoop` → "running" banner → auto-refresh → proposed v1 (dev model `pcsoftai`; 8 converted / 2 not) | ✅ behaviour-only playbook, rationale, 6 changes; window counters reset |
+| Edit proposal → **Approve with edits** → `store.salesPlaybook` = edited text, v1 live, marked edited | ✅ |
+| Chat after approval: session stamped `playbookVersion: 1`; reply follows the playbook (grouped options, fit-based pick, closes with a cart offer) | ✅ |
+| Turn off (confirm modal) → v1 retired, baseline live; Restore → v1 live again | ✅ |
+| Threshold settings save (20 / 5), meters follow | ✅ |
+| `learningLoop` cron path (no force) → `below thresholds`, `lastCheckAt` shown | ✅ |
+| Proposal card: changes list, Compare with live version; Reject (confirm modal) → v2 rejected, "never live" | ✅ |
+| Context tab: Sales playbook row "Active · v1", Manage → Learning tab | ✅ |
+| CSV/JSON export buttons | not clicked |
+| Analysis with the Anthropic analysis model; an automatic proposal from real thresholds | not run — dev uses the OpenAI-compatible model and has no real conversions |
+
+Fixed during verification: the version field `changes` read as `undefined`
+through the internal API — `GadgetRecord#changes()` shadows it — renamed to
+`changeSummary` (same storage key); Reject confirm text clarified.
 
 ## Verification — phase 3a Analytics (2026-11-09, dev env, staging store `a7gc2spzm0`)
 
