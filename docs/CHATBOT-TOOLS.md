@@ -13,8 +13,27 @@ Admin v2 (spec: "Recover AI Chatbot - Admin v2 Requirements", ClickUp
 86eybafcf) is being built in phases. **Phase 1** (this doc) = 9-tab admin,
 context sources + exports, Integrations tab, feature toggles, safeguards + rate
 limiting. **Phase 2** = CRM ticket answering (Freshdesk), below. **Phase 3a** =
-Analytics tab, below. **Learning** = the sales learning loop, below. The API
-tab and closing incentive show as "coming soon".
+Analytics tab, below. **Learning** = the sales learning loop, below. **API** =
+API keys + read-only REST endpoints, below. The closing incentive shows as
+"coming soon".
+
+## API tab (REST API)
+
+Code: `api/lib/publicApi.js` (keys, auth, pagination, serializers),
+`api/routes/v1/*` (endpoints), `api/actions/apiAdmin.ts` (tab operations,
+current store only), model `apiKey`, `web/routes/api.tsx`. Scope list
+`API_SCOPES` (+ `API_EXPIRY_DAYS`, `API_MAX_KEYS`) in `defaults.js`.
+
+| What | How |
+|---|---|
+| Keys | `rak_` + 32 random bytes (base64url). Only the SHA-256 (`keyHash`) and a display `prefix` are stored; the secret is shown once at creation. Each key has a **label**, **scopes** (resources), optional **expiry** (30/90/180/365 days or never). Max 20 active per store. **Revoke** is immediate; revoked/expired keys can then be removed. `lastUsedAt` is updated at most once a minute. |
+| Auth | `Authorization: Bearer rak_…` (or `X-Api-Key`). 401 missing/invalid/expired/revoked, 403 missing scope, 400 bad query, 404 unknown conversation; body `{"error": "…"}`. The store is always the key's store. |
+| Endpoints (all GET) | `/v1/me` (any key) · `/v1/conversations`, `/v1/conversations/{sessionId}` (conversations) · `/v1/analytics?days=` (analytics, same numbers as the tab) · `/v1/context` (context) · `/v1/feedback?source=ratings\|crm` (feedback) · `/v1/learning` (learning) · `/v1/settings` (settings) · `/v1/safety-events?kind=` (safety) |
+| Lists | Newest first; `limit` (1–200, default 50), `since` / `until` (ISO, on createdAt), `cursor` = previous page's `nextCursor` (createdAt of its last row; `null` on the last page). Conversations also filter on `needsHuman`, `flagged`, `converted` (`=true`). |
+| Never returned | Shopper IPs, LLM/Freshdesk/ShipStation keys, the handoff webhook URL (only `webhookConfigured`), key hashes. |
+
+Everything is read-only for now; write endpoints (e.g. updating context or
+settings) are not built.
 
 ## Analytics (phase 3a)
 

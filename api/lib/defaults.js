@@ -312,3 +312,19 @@ export function tokenCost(model, usage) {
 export const PRODUCT_TOOLS = ["search_products", "get_product_details", "get_related_products", "compare_products", "browse_categories", "get_product_reviews"];
 // Days after a chat during which an order from the shopper's own cart counts as assisted.
 export const ASSISTED_WINDOW_DAYS = 7;
+
+// ─────────────────────────── REST API (API tab) ───────────────────────────
+
+// Resources an API key can be scoped to. Every endpoint is read-only and
+// returns only the key's own store (api/lib/publicApi.js).
+export const API_SCOPES = [
+  { key: "conversations", label: "Conversations", endpoints: ["GET /v1/conversations", "GET /v1/conversations/{sessionId}"], hint: "Chat sessions and full transcripts" },
+  { key: "analytics", label: "Analytics", endpoints: ["GET /v1/analytics"], hint: "Overview, funnel, support numbers and daily rows" },
+  { key: "context", label: "Context", endpoints: ["GET /v1/context"], hint: "Guidelines, FAQ, voice & tone, safeguards text, sales playbook" },
+  { key: "feedback", label: "Feedback", endpoints: ["GET /v1/feedback"], hint: "Shopper ratings and CRM draft-vs-sent feedback" },
+  { key: "learning", label: "Learning", endpoints: ["GET /v1/learning"], hint: "Playbook versions and their conversion stats" },
+  { key: "settings", label: "Settings", endpoints: ["GET /v1/settings"], hint: "Branding, features, safeguards, CRM and learning settings (never secrets)" },
+  { key: "safety", label: "Safety events", endpoints: ["GET /v1/safety-events"], hint: "Rate-limit, lockout and flag events" },
+];
+export const API_EXPIRY_DAYS = [30, 90, 180, 365]; // 0 = never, also offered
+export const API_MAX_KEYS = 20; // active keys per store

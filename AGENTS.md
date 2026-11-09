@@ -103,6 +103,10 @@ setup (ggt dev + `stencil start` + the script tag in
   approves (optionally edited), rejects or rolls back in `learningAdmin`. The
   live text is `store.salesPlaybook` (appended by `buildSystem`); each chat is
   stamped with `chatSession.playbookVersion` for per-version conversion.
+- `api/lib/publicApi.js` + `api/routes/v1/*` — API tab: hashed, labeled,
+  expiring, resource-scoped API keys (`apiKey` model, managed by the
+  `apiAdmin` action) and read-only REST endpoints. Never return secrets or
+  shopper IPs from `/v1/*`; add new resources to `API_SCOPES` in `defaults.js`.
 - Back-in-stock is removed for now (tool, cron, admin list); the `stockAlert`
   model is kept.
 - `api/routes/GET-widget.js` — serves the widget; `?api=` and `?store=` query

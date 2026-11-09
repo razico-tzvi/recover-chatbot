@@ -16,7 +16,7 @@ import { IntegrationsPage } from "../routes/integrations";
 import { FeaturesPage } from "../routes/features";
 import { ConversationsPage } from "../routes/conversations";
 import { AnalyticsPage } from "../routes/analytics";
-import { ComingSoonPage } from "../routes/comingSoon";
+import { ApiPage } from "../routes/api";
 import { CrmPage } from "../routes/crm";
 import { LearningPage } from "../routes/learning";
 import { freshdeskHost } from "../../api/lib/integrations";
@@ -47,7 +47,7 @@ function App() {
         <Route path="analytics" element={<AnalyticsPage />} />
         <Route path="conversations" element={<ConversationsPage />} />
         <Route path="learning" element={<LearningPage />} />
-        <Route path="api" element={<ComingSoonPage tab="api" />} />
+        <Route path="api" element={<ApiPage />} />
         <Route path="*" element={<Error404 />} />
       </Route>
     )
