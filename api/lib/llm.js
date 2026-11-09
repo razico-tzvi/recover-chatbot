@@ -13,7 +13,8 @@ export function llmConfig(store, role) {
   return { provider, model, baseUrl, apiKey, configured };
 }
 
-export async function complete(cfg, { system, user, maxTokens = 1500 }) {
+// Returns { text, truncated } — truncated when the output hit maxTokens.
+export async function complete(cfg, { system, user, maxTokens = 2000 }) {
   if (cfg.provider === "anthropic") {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -23,7 +24,8 @@ export async function complete(cfg, { system, user, maxTokens = 1500 }) {
     });
     if (!res.ok) throw new Error(`Anthropic ${res.status}`);
     const data = await res.json();
-    return (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+    const text = (data.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+    return { text, truncated: data.stop_reason === "max_tokens" };
   }
   const res = await fetch(`${cfg.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
     method: "POST",
@@ -33,5 +35,6 @@ export async function complete(cfg, { system, user, maxTokens = 1500 }) {
   });
   if (!res.ok) throw new Error(`LLM ${res.status}`);
   const data = await res.json();
-  return data.choices?.[0]?.message?.content || "";
+  const choice = data.choices?.[0] || {};
+  return { text: choice.message?.content || "", truncated: choice.finish_reason === "length" };
 }

@@ -12,7 +12,7 @@ import {
   CRM_GUARDRAILS, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
   resolveBranding, resolveCrm, matchBlocklist,
 } from "./defaults";
-import { freshdesk, freshdeskConnected, FreshdeskRateLimit } from "./integrations";
+import { freshdesk, freshdeskBudget, freshdeskConnected, FreshdeskRateLimit } from "./integrations";
 import { llmConfig, complete } from "./llm";
 
 const STATUS_OPEN = 2;
@@ -24,6 +24,7 @@ const FEEDBACK_WINDOW_MS = 14 * 24 * 3600 * 1000;
 const FEEDBACK_RECHECK_MS = 60 * 60 * 1000;
 const HISTORY_FIRST_SYNC_MS = 90 * 24 * 3600 * 1000;
 const MAX_HISTORY_PER_RUN = 150;
+const HISTORY_BUDGET_SHARE = 0.4;
 
 const block = (v, fallback) => (v && String(v).trim()) || fallback;
 const clip = (s, n) => String(s || "").slice(0, n);
@@ -66,6 +67,7 @@ export async function pollStore(ctx, store) {
 
   let handled = 0;
   let error = "";
+  let retryAfter = 0;
   try {
     outer: for (let page = 1; page <= 3; page++) {
       const tickets = await freshdesk(
@@ -92,13 +94,19 @@ export async function pollStore(ctx, store) {
     }
   } catch (err) {
     // A rate limit just ends this tick; the cursor is kept and the next tick resumes.
-    if (!(err instanceof FreshdeskRateLimit)) {
+    if (err instanceof FreshdeskRateLimit) retryAfter = err.retryAfter || 60;
+    else {
       error = `Polling failed: ${err?.message || err}`;
       logger.warn({ err, storeId: store.id }, "crm poll failed");
     }
   }
 
-  await saveState(api, store, { pollCursor: cursor.toISOString(), lastPollAt: new Date().toISOString(), lastPollError: error });
+  await saveState(api, store, {
+    pollCursor: cursor.toISOString(),
+    lastPollAt: new Date().toISOString(),
+    lastPollError: error,
+    pollPausedUntil: retryAfter ? new Date(Date.now() + retryAfter * 1000).toISOString() : "",
+  });
   return { handled, error };
 }
 
@@ -139,7 +147,7 @@ export async function processTicket(ctx, store, crm, cfg, t) {
       return row;
     }
 
-    const d = await draftReply(ctx, store, cfg, { subject, question, name: t.requester?.name });
+    const d = await draftReply(ctx, store, cfg, { subject, question, name: requesterName(t.requester) });
     const text = withSignature(d.reply, crm.signature);
     if (crm.mode === "live" && d.confident) {
       await freshdesk(store, "POST", `/tickets/${t.id}/reply`, { body: toHtml(text) });
@@ -161,6 +169,15 @@ export async function processTicket(ctx, store, crm, cfg, t) {
   }
 }
 
+// Freshdesk names contacts after their email's local part when no name was given
+// ("ai-test-sizing"); greeting someone by their email handle reads badly, so skip it.
+export function requesterName(r) {
+  const name = String(r?.name || "").trim();
+  const local = String(r?.email || "").split("@")[0].trim().toLowerCase();
+  if (!name || (local && name.toLowerCase() === local) || name.includes("@")) return "";
+  return name;
+}
+
 const nextCheck = (ms) => new Date(Date.now() + ms).toISOString();
 
 async function addNote(store, ticketId, header, text) {
@@ -177,7 +194,7 @@ async function addTag(ctx, store, t, tag) {
     await freshdesk(store, "PUT", `/tickets/${t.id}`, { tags });
     t.tags = tags;
   } catch (err) {
-    if (err instanceof FreshdeskRateLimit) throw err;
+    // Never rethrow: the note/reply is already posted, and a retry would post it twice.
     ctx.logger.warn({ err, ticketId: t.id, tag }, "crm tag update failed");
   }
 }
@@ -212,12 +229,20 @@ The reply is plain text (no markdown), starts with a greeting${name ? " using th
   );
 
   const user = `Ticket subject: ${subject || "(none)"}\n${name ? `Customer name: ${clip(name, 80)}\n` : ""}Customer message:\n"""\n${question || "(empty)"}\n"""`;
-  const raw = await complete(cfg, { system: parts.join("\n\n"), user });
-  return parseDraft(raw);
+  const system = parts.join("\n\n");
+  // Output cut off at the token limit is never posted: retry once with more room, else fail (Retry in the admin).
+  let out = await complete(cfg, { system, user, maxTokens: 2000 });
+  if (out.truncated) out = await complete(cfg, { system, user, maxTokens: 6000 });
+  if (out.truncated) throw new Error("The AI's draft was cut off at the token limit; nothing was posted.");
+  return parseDraft(out.text);
 }
 
+// The model is asked for {"confident","reason","reply"}. Slightly malformed JSON
+// is salvaged by reading the "reply" string; anything else is refused rather
+// than posting raw model output on a ticket.
 export function parseDraft(raw) {
-  const s = String(raw || "");
+  const s = String(raw || "").trim();
+  if (!s) throw new Error("The AI returned an empty draft.");
   const i = s.indexOf("{");
   const j = s.lastIndexOf("}");
   if (i >= 0 && j > i) {
@@ -226,11 +251,17 @@ export function parseDraft(raw) {
       if (o && typeof o.reply === "string" && o.reply.trim()) {
         return { confident: o.confident === true, reason: clip(o.reason, 300), reply: o.reply.trim() };
       }
+    } catch { /* try the salvage below */ }
+  }
+  const m = /"reply"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(s);
+  if (m) {
+    try {
+      const reply = JSON.parse(`"${m[1]}"`).trim();
+      if (reply) return { confident: false, reason: "The AI's answer was slightly malformed; review carefully.", reply };
     } catch { /* fall through */ }
   }
-  const text = s.trim();
-  if (!text) throw new Error("The AI returned an empty draft.");
-  return { confident: false, reason: "The AI's answer wasn't in the expected format.", reply: text };
+  if (i < 0) return { confident: false, reason: "The AI answered in plain text instead of the expected format.", reply: s };
+  throw new Error("The AI's draft wasn't in the expected format; nothing was posted.");
 }
 
 const STOP = new Set("the and for you your with that this have from are was were not but can our any all has had will would could should about what when where which there their them they then than into out how why who its it's i'm i've don't hi hello thanks thank please order orders".split(" "));
@@ -349,6 +380,9 @@ export async function syncHistory(ctx, store) {
         const tags = (t.tags || []).map((x) => String(x).toLowerCase());
         // Live-mode AI replies are posted as an agent; keep them out of "how agents answer".
         if ([STATUS_RESOLVED, STATUS_CLOSED].includes(t.status) && !tags.includes(crm.answeredTag)) {
+          // Backfill yields to new-ticket handling: stop below 40% of the minute's budget.
+          const budget = freshdeskBudget(store);
+          if (budget && budget.remaining < budget.total * HISTORY_BUDGET_SHARE) throw new FreshdeskRateLimit(60);
           examined++;
           const convos = (await freshdesk(store, "GET", `/tickets/${t.id}/conversations?per_page=100`)) || [];
           const answer = convos.filter(isAgentReply).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");

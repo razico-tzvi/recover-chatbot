@@ -37,6 +37,14 @@ export class FreshdeskRateLimit extends Error {
 }
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Last X-Ratelimit-Remaining / -Total seen per helpdesk, so background work
+// (history sync) can leave headroom for new-ticket handling.
+const budgets = new Map();
+export function freshdeskBudget(store) {
+  const b = budgets.get(freshdeskHost(store?.freshdeskDomain));
+  return b && Date.now() - b.at < 60_000 ? b : null;
+}
 const MAX_RATE_WAIT_S = 5;
 
 // Small authenticated Freshdesk v2 client. Plans have per-minute API limits
@@ -64,6 +72,9 @@ export async function freshdesk(store, method, path, body) {
       }
       throw new FreshdeskRateLimit(after);
     }
+    const remaining = Number(res.headers.get("x-ratelimit-remaining"));
+    const total = Number(res.headers.get("x-ratelimit-total"));
+    if (Number.isFinite(remaining) && Number.isFinite(total) && total > 0) budgets.set(host, { remaining, total, at: Date.now() });
     return handle(res, method, path);
   }
 }

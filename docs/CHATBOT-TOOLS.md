@@ -206,7 +206,8 @@ dropped (the filter file is kept).
 | **Try it** (preview, nothing posted) | ✅ grounded in the FAQ (30-day returns, 5–7 day refunds), marked confident |
 | Save signature + blocklist topic → `crmSettings` round-trip (keywords normalized, mode Off keeps `enabledAt` empty); reverted afterwards | ✅ |
 | Context tab: Freshdesk history "Synced", count, CSV/JSON | ✅ (rendered; downloads not clicked) |
-| Check now / Learning / Live against the real helpdesk | not run — it would post notes/replies on real customer tickets; covered by the mocked run |
+| **Learning mode on the real helpdesk** (2026-11-09, temporary config: only `ai-handoff`, skip list empty, blocklist "Chargebacks"; 3 test handoffs from the dev chat with `@example.com` emails → #122542–#122544) | ✅ #122543 ("…file a chargeback…") → blocked, tagged, no AI text; #122544 → clean private-note draft grounded in the FAQ, flagged "needs agent"; log + detail view in the CRM tab. Settings restored to Off/defaults afterwards |
+| Live mode, feedback capture on a real agent reply | not run — Live would email a customer, and no agent login was available to reply; both covered by the mocked run |
 
 Fixed during staging verification: (1) the first sync hit Freshdesk's rate
 limit after ~29 tickets; in-action waits then got the job aborted → replaced
@@ -214,6 +215,23 @@ with saved cursor + scheduled continuation; (2) the CRM status block showed
 stale counts/errors after a background run → it now reads `crmState` on its
 own and refreshes every 5 s for 2 min after Check/Sync; (3) **Sync now**
 while a continuation is pending no longer starts a parallel chain.
+
+Fixed during the live Learning-mode test: (4) the history backfill used the
+whole per-minute API budget, so the ticket poll got rate-limited — backfill now
+stops below 40% of `X-Ratelimit-Remaining`, and a rate-limited poll shows a
+notice; (5) the dev model's JSON reply was **cut off at the token limit** and the
+raw JSON was posted as the note on #122542 — `complete()` now reports
+truncation, drafting retries once with a larger budget, the parser salvages the
+`reply` field from malformed JSON, and anything still unusable is recorded as an
+`error` (Retry) with **nothing posted**; (6) a failed tag update after a posted
+note no longer causes a second note on the next tick; (7) greetings no longer
+use the email handle Freshdesk assigns as a name ("Hi Ai-test-sizing"); (8) the
+ticket log refreshes every 15 s.
+
+Test leftovers: Freshdesk tickets #122542–#122544 (subjects start "Chat
+handoff", bodies "[TEST - please ignore]") are still open and need closing by
+an agent; #122542 carries the malformed raw-JSON note from before fix (5).
+Dev DB: chat sessions `crm-test-*` and their `crmTicket` rows.
 
 ## Required BigCommerce OAuth scopes
 

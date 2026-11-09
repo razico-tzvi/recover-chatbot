@@ -108,6 +108,9 @@ function ModeCard() {
       {!llmReady && <Alert tone="warn">Connect Anthropic (API key and model) on the Integrations tab — drafts use the CRM model set there.</Alert>}
       {st.lastPollError && <Alert tone="crit">Last check: {st.lastPollError}</Alert>}
       {st.lastSyncError && <Alert tone="crit">Last history sync: {st.lastSyncError}</Alert>}
+      {st.pollPausedUntil && new Date(st.pollPausedUntil) > new Date(Date.now() - 5 * 60 * 1000) && (
+        <Alert tone="info">The last ticket check paused at Freshdesk's API rate limit; the next check (within 5 minutes) picks up where it stopped.</Alert>
+      )}
       {st.syncPausedUntil && new Date(st.syncPausedUntil) > new Date() && (
         <Alert tone="info">History sync is pausing for Freshdesk's API rate limit and resumes automatically around {new Date(st.syncPausedUntil).toLocaleTimeString()}.</Alert>
       )}
@@ -213,6 +216,11 @@ function ActivityCard() {
   const [msg, setMsg] = useState<OpResult | null>(null);
   // @ts-ignore
   const [{ data, fetching, error }, refetch] = useFindMany(api.crmTicket, { sort: { createdAt: "Descending" }, first: 100 });
+  // Background checks add rows; keep the list current while the tab is open.
+  useEffect(() => {
+    const t = setInterval(() => refetch({ requestPolicy: "network-only" }), 15000);
+    return () => clearInterval(t);
+  }, []);
   const rows: any[] = data ? [...data] : [];
 
   const reviewed = rows.filter((r) => typeof r.similarity === "number");
