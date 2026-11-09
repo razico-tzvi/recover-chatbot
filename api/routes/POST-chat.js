@@ -1,7 +1,7 @@
 import { RouteHandler } from "gadget-server";
 import {
   GUARDRAILS, DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
-  resolveBranding, resolveFeatures, resolveSafeguards, enabledTools,
+  resolveBranding, resolveFeatures, resolveSafeguards, enabledTools, tokenCost, PRODUCT_TOOLS,
 } from "../lib/defaults";
 import { freshdeskConnected, createFreshdeskTicket } from "../lib/integrations";
 
@@ -51,6 +51,8 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
 
   const ip = clientIp(request);
   const sessionId = body.sessionId ? String(body.sessionId).slice(0, 100) : "";
+  // The shopper's own storefront cart (read by the widget), for assisted-conversion attribution.
+  const storefrontCartId = /^[A-Za-z0-9-]{8,64}$/.test(String(body.cartId || "")) ? String(body.cartId) : "";
   const safeguards = resolveSafeguards(store);
   const limited = await checkRateLimits(api, { store, sessionId, ip, safeguards });
   if (limited) {
@@ -75,10 +77,11 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
 
   let assistantText = "";
   const toolsUsed = [];
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   try {
     await runChatStream({
       provider, baseUrl, model, apiKey, messages, bc, logger, system, tools, allowed,
-      api, sessionId, storeHash, store, emails, ip, safeguards, toolsUsed,
+      api, sessionId, storeHash, store, emails, ip, safeguards, toolsUsed, usage,
       onDelta: (t) => { if (t) { assistantText += t; write({ type: "delta", text: t }); } },
     });
     write({ type: "done" });
@@ -93,7 +96,7 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
     const lastUser = messages[messages.length - 1] || {};
     await persistTurn(api, {
       storeId: store.id, sessionId, userText: String(lastUser.content || ""),
-      userImages: lastUser.images, assistantText, provider, model, ip, toolsUsed,
+      userImages: lastUser.images, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId,
     });
   } catch (err) {
     logger.error({ err }, "persist turn failed");
@@ -405,7 +408,7 @@ function anthropicContent(m) {
 // Store the user message + assistant reply and upsert the session summary,
 // so the app's Conversations view can list sessions and show transcripts. The
 // user message keeps the IP (per-IP rate limits); the reply keeps the tools used.
-async function persistTurn(api, { storeId, sessionId, userText, userImages, assistantText, provider, model, ip, toolsUsed }) {
+async function persistTurn(api, { storeId, sessionId, userText, userImages, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId }) {
   if (!sessionId || !storeId) return;
   const imgs = Array.isArray(userImages) && userImages.length ? userImages : null;
   if (userText || imgs) {
@@ -419,11 +422,22 @@ async function persistTurn(api, { storeId, sessionId, userText, userImages, assi
   }
 
   const added = ((userText || imgs) ? 1 : 0) + (assistantText.trim() ? 1 : 0);
+  // Analytics: token usage and cost (priced at the turn's model), funnel stages, cart link.
+  const used = toolsUsed || [];
+  const cost = tokenCost(model, usage);
+  const stats = (row) => ({
+    inputTokens: (row?.inputTokens || 0) + (usage?.input || 0) + (usage?.cacheRead || 0) + (usage?.cacheWrite || 0),
+    outputTokens: (row?.outputTokens || 0) + (usage?.output || 0),
+    ...(cost != null ? { costUsd: (row?.costUsd || 0) + cost } : {}),
+    ...(used.some((t) => PRODUCT_TOOLS.includes(t)) ? { productsShown: true } : {}),
+    ...(used.includes("add_to_cart") ? { addedToCart: true } : {}),
+    ...(storefrontCartId ? { storefrontCartId } : {}),
+  });
   const row = await findSession(api, storeId, sessionId);
   if (row) {
-    await api.internal.chatSession.update(row.id, { messageCount: (row.messageCount || 0) + added, provider, model });
+    await api.internal.chatSession.update(row.id, { messageCount: (row.messageCount || 0) + added, provider, model, ...stats(row) });
   } else {
-    await api.internal.chatSession.create({ sessionId, storeId, preview: (userText || "(image)").slice(0, 140), messageCount: added, provider, model });
+    await api.internal.chatSession.create({ sessionId, storeId, preview: (userText || "(image)").slice(0, 140), messageCount: added, provider, model, ...stats(null) });
   }
 }
 
@@ -513,6 +527,7 @@ async function runChatStream(opts) {
     bc: opts.bc, logger: opts.logger, api: opts.api, sessionId: opts.sessionId,
     storeHash: opts.storeHash, store: opts.store, emails: opts.emails,
     ip: opts.ip, safeguards: opts.safeguards, allowed: opts.allowed, toolsUsed: opts.toolsUsed,
+    usage: opts.usage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };
   const common = { model: opts.model, apiKey: opts.apiKey, messages: opts.messages, system: opts.system, tools: opts.tools, ctx, onDelta: opts.onDelta };
   if (opts.provider === "anthropic") return runAnthropicStream(common);
@@ -550,7 +565,7 @@ async function runOpenAIStream({ baseUrl, model, apiKey, messages, system, tools
     const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages: convo, ...(tools.length ? { tools, tool_choice: "auto" } : {}), max_tokens: MAX_TOKENS, stream: true }),
+      body: JSON.stringify({ model, messages: convo, ...(tools.length ? { tools, tool_choice: "auto" } : {}), max_tokens: MAX_TOKENS, stream: true, stream_options: { include_usage: true } }),
     });
     if (!res.ok || !res.body) throw new Error(`LLM ${res.status}`);
 
@@ -558,6 +573,10 @@ async function runOpenAIStream({ baseUrl, model, apiKey, messages, system, tools
     const toolCalls = [];
     await forEachSSE(res, (data) => {
       const json = safeJson(data);
+      if (json.usage) {
+        ctx.usage.input += json.usage.prompt_tokens || 0;
+        ctx.usage.output += json.usage.completion_tokens || 0;
+      }
       const delta = json.choices?.[0]?.delta || {};
       if (delta.content) { content += delta.content; onDelta(delta.content); }
       if (delta.tool_calls) {
@@ -597,9 +616,16 @@ async function runAnthropicStream({ model, apiKey, messages, system, tools: open
 
     const blocks = [];
     let stopReason = null;
+    let outTokens = 0;
     await forEachSSE(res, (data) => {
       const ev = safeJson(data);
-      if (ev.type === "content_block_start") {
+      if (ev.type === "message_start") {
+        const u = ev.message?.usage || {};
+        ctx.usage.input += u.input_tokens || 0;
+        ctx.usage.cacheRead += u.cache_read_input_tokens || 0;
+        ctx.usage.cacheWrite += u.cache_creation_input_tokens || 0;
+        outTokens = u.output_tokens || 0;
+      } else if (ev.type === "content_block_start") {
         const b = ev.content_block || {};
         blocks[ev.index] = b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, partial: "" } : { type: "text", text: "" };
       } else if (ev.type === "content_block_delta") {
@@ -607,10 +633,12 @@ async function runAnthropicStream({ model, apiKey, messages, system, tools: open
         if (!b) return;
         if (ev.delta?.type === "text_delta") { b.text += ev.delta.text || ""; onDelta(ev.delta.text || ""); }
         else if (ev.delta?.type === "input_json_delta") { b.partial += ev.delta.partial_json || ""; }
-      } else if (ev.type === "message_delta" && ev.delta?.stop_reason) {
-        stopReason = ev.delta.stop_reason;
+      } else if (ev.type === "message_delta") {
+        if (ev.delta?.stop_reason) stopReason = ev.delta.stop_reason;
+        if (ev.usage?.output_tokens != null) outTokens = ev.usage.output_tokens; // cumulative for this message
       }
     });
+    ctx.usage.output += outTokens;
 
     if (stopReason === "tool_use") {
       const assistant = blocks

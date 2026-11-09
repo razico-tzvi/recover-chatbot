@@ -2,10 +2,6 @@ import { Card, Tag } from "../components/ui";
 
 // Tabs whose features ship in later phases of the Admin v2 build.
 const COPY: Record<string, { header: string; body: string }> = {
-  analytics: {
-    header: "Analytics",
-    body: "Coming soon: overview (conversations, containment, ratings, AI cost), the sales funnel with direct vs. assisted conversion, incentive A/B results, support and safety numbers. Rate-limit hits, lockouts and flags are already being recorded.",
-  },
   learning: {
     header: "Learning",
     body: "Coming soon: the sales learning loop. After 250 settled conversations with 25+ conversions, it compares converted and non-converted chats and proposes a new sales playbook version for approval, with rollback.",

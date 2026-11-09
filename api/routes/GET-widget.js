@@ -92,6 +92,50 @@ function widgetSource() {
     } catch (e) { return String(Date.now()); }
   }
 
+  // The shopper's own storefront cart (same-origin Storefront API), sent with
+  // each message so an order from it can be credited to the chat (assisted).
+  var sfCart = "";
+  function refreshCart() {
+    try {
+      fetch("/api/storefront/carts", { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : []; })
+        .then(function (c) { if (c && c[0] && c[0].id) sfCart = String(c[0].id); })
+        .catch(function () {});
+    } catch (e) {}
+  }
+  refreshCart();
+
+  // ---- "Was this helpful?" — one rating per conversation, shown under the latest reply ----
+  var rateEl = null;
+  function ratedKey() { return "recover_chat_rated_" + sessionId(); }
+  function isRated() { try { return !!localStorage.getItem(ratedKey()); } catch (e) { return false; } }
+  function removeRating() { if (rateEl && rateEl.parentNode) rateEl.parentNode.removeChild(rateEl); rateEl = null; }
+  function showRating() {
+    removeRating();
+    if (isRated()) return;
+    rateEl = document.createElement("div");
+    rateEl.className = "rate";
+    rateEl.appendChild(document.createTextNode("Was this helpful?"));
+    [["\uD83D\uDC4D", 1, "Yes, helpful"], ["\uD83D\uDC4E", -1, "Not helpful"]].forEach(function (o) {
+      var b = document.createElement("button");
+      b.type = "button"; b.textContent = o[0]; b.setAttribute("aria-label", o[2]);
+      b.addEventListener("click", function () { rate(o[1]); });
+      rateEl.appendChild(b);
+    });
+    listEl.appendChild(rateEl);
+    listEl.scrollTop = listEl.scrollHeight;
+  }
+  function rate(value) {
+    try { localStorage.setItem(ratedKey(), String(value)); } catch (e) {}
+    if (rateEl) rateEl.textContent = "Thanks for the feedback!";
+    fetch(apiBase + "/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ storeHash: store, sessionId: sessionId(), rating: value })
+    }).catch(function () {});
+    setTimeout(removeRating, 2500);
+  }
+
   function renderText(text) {
     var s = String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     var links = [];
@@ -148,6 +192,9 @@ function widgetSource() {
     ".chip{border:1px solid #dcdfe3;background:#fff;border-radius:22px;padding:12px 18px;font-size:14px;font-weight:500;color:#1a1a1a;cursor:pointer;max-width:92%;text-align:left;line-height:1.35;transition:all .12s ease}" +
     ".chip:hover{border-color:" + color + ";background:#fff7f3}" +
     ".status{font-size:12px;color:#8a8f98;margin:0 0 10px 2px;font-style:italic}" +
+    ".rate{display:flex;align-items:center;gap:6px;font-size:12px;color:#8a8f98;margin:-4px 0 12px 2px}" +
+    ".rate button{border:1px solid #dcdfe3;background:#fff;border-radius:14px;padding:2px 9px;cursor:pointer;font-size:13px;line-height:1.5}" +
+    ".rate button:hover{border-color:" + color + "}" +
     ".footer{padding:0 12px 12px;background:#fff}" +
     ".disclaimer{position:relative;background:#f1f2f4;border-radius:12px;padding:12px 34px 12px 14px;margin-bottom:9px;font-size:12.5px;color:#5b616b;line-height:1.5}" +
     ".disclaimer .x{position:absolute;top:9px;right:11px;cursor:pointer;color:#9aa0a8;font-size:16px;line-height:1}" +
@@ -265,7 +312,7 @@ function widgetSource() {
     else if (voiceMode) stopVoiceMode();
   }
   function resetChat() {
-    messages = []; suggestsEl = null; listEl.innerHTML = "";
+    messages = []; suggestsEl = null; rateEl = null; listEl.innerHTML = "";
     try { synth && synth.cancel(); } catch (e) {}
     renderIntro();
   }
@@ -402,7 +449,7 @@ function widgetSource() {
     var text = (inputEl.value || "").trim().slice(0, 4000);
     var imgs = pending.slice();
     if (!text && imgs.length === 0) return;
-    clearSuggestions();
+    clearSuggestions(); removeRating();
     inputEl.value = ""; pending = []; renderPreviews(); updateVoiceBtn();
     var userMsg = { role: "user", content: text };
     if (imgs.length) userMsg.images = imgs;
@@ -425,6 +472,8 @@ function widgetSource() {
       else if (replyEl) { replyEl.innerHTML = renderText(reply); }
       messages.push({ role: "assistant", content: reply || "Sorry, I couldn't respond." });
       streaming = false; voiceBtn.disabled = false; updateVoiceBtn();
+      if (reply) showRating();
+      refreshCart();
       if (voiceMode) speakThenListen(reply); else inputEl.focus();
     }
     function fail() {
@@ -439,7 +488,7 @@ function widgetSource() {
     fetch(apiBase + "/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId: sessionId(), store: store, storeHash: store, messages: payload, page: pageContext() })
+      body: JSON.stringify({ sessionId: sessionId(), store: store, storeHash: store, cartId: sfCart, messages: payload, page: pageContext() })
     }).then(function (res) {
       if (!res.ok) return Promise.reject(res);
       if (!res.body || !res.body.getReader) {

@@ -93,6 +93,10 @@ setup (ggt dev + `stencil start` + the script tag in
   syncs agent replies. Only tickets created after the mode left Off are
   touched. Don't run Check now / Live mode against a real helpdesk without
   the store owner's OK — it posts notes/replies on customer tickets.
+- `api/lib/analytics.js` — Analytics tab (phase 3a): `getAnalytics` aggregates
+  per store; `syncOrders` cron (hourly) credits BigCommerce orders to chats by
+  cart id (direct = bot-built cart, assisted = shopper's own cart within 7 days).
+  Token cost uses `MODEL_PRICES` in `defaults.js` — add new models there.
 - Back-in-stock is removed for now (tool, cron, admin list); the `stockAlert`
   model is kept.
 - `api/routes/GET-widget.js` — serves the widget; `?api=` and `?store=` query

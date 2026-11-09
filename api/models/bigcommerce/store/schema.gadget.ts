@@ -7,6 +7,10 @@ export const schema: GadgetModel = {
   type: "gadget/model-schema/v2",
   storageKey: "DataModel-BigCommerce-Store",
   fields: {
+    analyticsState: {
+      type: "json",
+      storageKey: "store-analyticsState",
+    },
     anthropicModels: {
       type: "json",
       storageKey: "store-anthropicModels",

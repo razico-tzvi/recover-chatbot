@@ -12,8 +12,36 @@ per-store settings resolvers shared by the backend and the admin live in
 Admin v2 (spec: "Recover AI Chatbot - Admin v2 Requirements", ClickUp
 86eybafcf) is being built in phases. **Phase 1** (this doc) = 9-tab admin,
 context sources + exports, Integrations tab, feature toggles, safeguards + rate
-limiting. **Phase 2** = CRM ticket answering (Freshdesk), below. Phases 3–5
-(Analytics + API, closing incentive, learning loop) show as "coming soon" tabs.
+limiting. **Phase 2** = CRM ticket answering (Freshdesk), below. **Phase 3a** =
+Analytics tab, below. The API tab, closing incentive and learning loop (rest of
+phases 3–5) show as "coming soon".
+
+## Analytics (phase 3a)
+
+Code: `api/lib/analytics.js` (order attribution + dashboard numbers),
+`api/actions/getAnalytics.ts` (tab data, current store only),
+`api/actions/syncOrders.ts` (cron `17 * * * *`), `api/routes/POST-feedback.js`
+(widget rating), `web/routes/analytics.tsx`.
+
+| What | How it's recorded |
+|---|---|
+| Conversations, messages | `chatSession` rows with `messageCount > 0` (flag-only rows are excluded) |
+| Containment | share of conversations without `handoffAt` |
+| Satisfaction | widget "Was this helpful? 👍 👎" under the latest reply → `POST /feedback` → `chatSession.rating` (1 / -1, last one wins, one per session in the widget) |
+| AI cost | `POST /chat` sums streamed usage per turn (Anthropic `message_start` / `message_delta`; OpenAI-compatible `stream_options.include_usage`) into `inputTokens` / `outputTokens`, and `costUsd` priced at the turn's model from `MODEL_PRICES` in `api/lib/defaults.js` (list prices, 2026-10). Unknown models (dev endpoint) show tokens only. CRM drafting cost is not counted yet. |
+| Funnel | `productsShown` (any of `PRODUCT_TOOLS` used), `addedToCart` (`add_to_cart` used), then orders |
+| Direct conversion | order whose `cart_id` is the cart the bot built (`chatCart`) |
+| Assisted conversion | order whose `cart_id` is the shopper's own storefront cart (widget reads `/api/storefront/carts` and sends `cartId` with each message → `chatSession.storefrontCartId`), placed within `ASSISTED_WINDOW_DAYS` (7) of the chat |
+| Support & safety | handoffs (open ones = `needsHuman`), flagged sessions, `safetyEvent` counts by kind, `crmTicket` counts by action and the share of drafts the agent edited (similarity < 0.9) |
+
+Order attribution reads `GET /v2/orders?min_date_created=` from a per-store
+cursor (`store.analyticsState.ordersCursor`; first run goes back 30 days, each
+run re-reads a 1-day overlap for orders that were still Incomplete). A session
+keeps its first conversion (`conversion`, `orderId`, `orderTotal`,
+`orderCurrency`, `convertedAt`). The tab's **Check orders now** runs the same
+sync for the current store. Ranges: 7 / 30 / 90 days, daily buckets in UTC,
+CSV export of the daily rows, table view of the chart. Incentive A/B results
+are a placeholder until the closing incentive ships.
 
 ## CRM ticket answering (Freshdesk, phase 2)
 
@@ -166,7 +194,8 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
   incentive is shown but disabled until phase 4.
 - **CRM** (`web/routes/crm.tsx`): ticket answering, see above. Titled
   "Freshdesk" once connected; a settings tab (shared Save).
-- **Analytics / Learning / API**: "coming soon" panels (`web/routes/comingSoon.tsx`).
+- **Analytics** (`web/routes/analytics.tsx`): see Analytics above.
+- **Learning / API**: "coming soon" panels (`web/routes/comingSoon.tsx`).
 - **Conversations** (`web/routes/conversations.tsx`): All / Needs human /
   Flagged filters, CSV/JSON export of the filtered set (one row per message,
   incl. tools called), flagged banner and tools-per-reply in the transcript,
@@ -176,8 +205,8 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
 
 | Model | Change |
 |---|---|
-| `bigcommerce/store` | + `faq`, `handoffEmail`, `handoffWebhookUrl`; v2: `botName`, `widgetColor`, `greeting`, `suggestedQuestions` (json), `disclaimer`, `handoffDestination`, `features` (json), `safeguards` (json), `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `anthropicModels` (json), `freshdeskDomain`, `freshdeskApiKey`, `shipstationApiKey`, `shipstationApiSecret` (encrypted), `lastFlagAlertAt`; phase 2: `crmSettings`, `crmState` (json) |
-| `chatSession` | + `needsHuman` (default false), `handoffEmail`, `handoffSummary`, `handoffAt`; v2: `flagged`, `flagReason`, `flaggedAt` |
+| `bigcommerce/store` | + `faq`, `handoffEmail`, `handoffWebhookUrl`; v2: `botName`, `widgetColor`, `greeting`, `suggestedQuestions` (json), `disclaimer`, `handoffDestination`, `features` (json), `safeguards` (json), `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `anthropicModels` (json), `freshdeskDomain`, `freshdeskApiKey`, `shipstationApiKey`, `shipstationApiSecret` (encrypted), `lastFlagAlertAt`; phase 2: `crmSettings`, `crmState` (json); phase 3a: `analyticsState` (json: `ordersCursor`, `ordersSyncedAt`) |
+| `chatSession` | + `needsHuman` (default false), `handoffEmail`, `handoffSummary`, `handoffAt`; v2: `flagged`, `flagReason`, `flaggedAt`; phase 3a: `inputTokens`, `outputTokens`, `costUsd`, `productsShown`, `addedToCart`, `storefrontCartId`, `rating`, `ratingAt`, `conversion` (direct/assisted), `orderId`, `orderTotal`, `orderCurrency`, `convertedAt` |
 | `chatMessage` | v2: + `ip` (user messages), `tools` (json, tools called for that reply) |
 | `stockAlert` | kept (feature removed for now) |
 | `safetyEvent` | new: `storeId`, `sessionId`, `ip`, `kind`, `detail`, `expiresAt` |
@@ -191,7 +220,8 @@ its own `chatSession` (Mark resolved) and run the `getCatalog` and
 own `crmTicket` / `crmHistory` rows (`accessControl/filters/crm*.gelly`, scoped
 by `storeId == $session.bigcommerceStoreId`) and run `crmAdmin` (same store
 resolution). The admin doesn't read `safetyEvent`, so that role grant was
-dropped (the filter file is kept).
+dropped (the filter file is kept). Phase 3a: run `getAnalytics` (same store
+resolution; it reads `safetyEvent` / `crmTicket` server-side).
 
 ## Verification — phase 2 CRM (2026-11-09)
 
@@ -233,6 +263,17 @@ handoff", bodies "[TEST - please ignore]") are still open and need closing by
 an agent; #122542 carries the malformed raw-JSON note from before fix (5).
 Dev DB: chat sessions `crm-test-*` and their `crmTicket` rows.
 
+## Verification — phase 3a Analytics (2026-11-09, dev env, staging store `a7gc2spzm0`)
+
+| Check | Result |
+|---|---|
+| Mocked DB + orders run of `syncStoreOrders` → `storeAnalytics` | ✅ chat-cart order → direct, own-cart order → assisted, own-cart order outside 7 days and Incomplete order ignored; second run attributes nothing; overview/funnel/support/daily numbers match the fixtures; unpriced model reported |
+| Live `POST /chat` on dev (OpenAI-compatible dev model) | ✅ session got `inputTokens` 10,017 / `outputTokens` 286, `productsShown`, `storefrontCartId`; `costUsd` null (no list price for the dev model) |
+| `POST /feedback` | ✅ rating saved; unknown session → 404; rating 5 → 400 |
+| Analytics tab in the staging control panel | ✅ tiles, daily chart, funnel, placeholder, support/safety render with dev data; **Check orders now** read staging orders and set the cursor (no chat carts among them, so 0 conversions) |
+| Anthropic streaming usage capture | not run live — dev uses the OpenAI-compatible endpoint; code path follows the documented `message_start` / `message_delta` usage fields |
+| Widget rating UI / storefront cart read on a real storefront | not run — needs the widget served from an env with this code on the storefront |
+
 ## Required BigCommerce OAuth scopes
 
 Set on the BigCommerce connection in the Gadget editor; stores must re-authorize
@@ -242,7 +283,7 @@ after a change.
 |---|---|---|
 | Products (read) | catalog, categories, brands, reviews | ✅ |
 | Carts (modify) | cart tools, shipping-quote temp cart | ✅ |
-| Orders (read) | `lookup_order` | ✅ (not re-tested) |
+| Orders (read) | `lookup_order`, Analytics order attribution | ✅ (`syncOrders` read staging orders 2026-11-09) |
 | Marketing (read) | `get_promotions` | ✅ (not re-tested) |
 | **Checkouts (modify)** | `apply_coupon`, `get_shipping_estimate` | ❌ **missing → 403** |
 | **Information & Settings (read)** | `GET /v2/store`: absolute product links, handoff admin-email fallback | ❌ **missing → 403** |

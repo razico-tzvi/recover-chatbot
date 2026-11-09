@@ -160,4 +160,29 @@ body { margin: 0; }
 .admin .loading { color: var(--muted); padding: 24px 0; }
 .admin .center { display: grid; place-items: center; min-height: 50vh; color: var(--muted); }
 
+/* Analytics */
+.admin .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.admin .stat { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; min-width: 0; }
+.admin .stat .label { font-size: 11.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.admin .stat .value { font-size: 26px; font-weight: 700; line-height: 1.25; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.admin .stat .hint { overflow-wrap: anywhere; }
+.admin .colchart { position: relative; padding-top: 16px; }
+.admin .colchart .ymax { position: absolute; top: 0; left: 0; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.admin .cols { display: flex; align-items: flex-end; gap: 2px; height: 160px; border-bottom: 1px solid var(--line); border-top: 1px dashed var(--line); }
+.admin .col { flex: 1; height: 100%; display: flex; align-items: flex-end; min-width: 0; cursor: default; outline-offset: 0; }
+.admin .col i { display: block; width: 100%; min-height: 1px; background: var(--bar); border-radius: 4px 4px 0 0; opacity: .85; }
+.admin .col.on i, .admin .col:focus-visible i { opacity: 1; background: var(--ink); }
+.admin .xaxis { display: flex; gap: 2px; margin-top: 4px; }
+.admin .xaxis span { flex: 1; min-width: 0; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: visible; }
+.admin .fstep { display: grid; grid-template-columns: minmax(150px, 2fr) 3fr minmax(90px, auto); align-items: center; gap: 12px; padding: 7px 0; }
+.admin .fname { font-weight: 600; font-size: 13px; min-width: 0; }
+.admin .fbar { background: var(--chip); border-radius: 4px; height: 14px; overflow: hidden; }
+.admin .fbar i { display: block; height: 100%; background: var(--bar); border-radius: 0 4px 4px 0; }
+.admin .fval { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.admin .kv { display: flex; flex-direction: column; gap: 2px; }
+.admin .kvrow { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.admin .card h2 + .kvrow, .admin .card .sub + .kvrow { border-top: 0; }
+.admin .kvrow b { font-variant-numeric: tabular-nums; }
+@media (max-width: 560px) { .admin .fstep { grid-template-columns: 1fr auto; } .admin .fbar { grid-column: 1 / -1; grid-row: 2; } }
+
 @media (prefers-reduced-motion: reduce) { .admin * { transition: none !important; } }

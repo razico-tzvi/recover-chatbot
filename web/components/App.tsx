@@ -15,6 +15,7 @@ import { ContextPage } from "../routes/context";
 import { IntegrationsPage } from "../routes/integrations";
 import { FeaturesPage } from "../routes/features";
 import { ConversationsPage } from "../routes/conversations";
+import { AnalyticsPage } from "../routes/analytics";
 import { ComingSoonPage } from "../routes/comingSoon";
 import { CrmPage } from "../routes/crm";
 import { freshdeskHost } from "../../api/lib/integrations";
@@ -42,7 +43,7 @@ function App() {
         <Route path="integrations" element={<IntegrationsPage />} />
         <Route path="features" element={<FeaturesPage />} />
         <Route path="crm" element={<CrmPage />} />
-        <Route path="analytics" element={<ComingSoonPage tab="analytics" />} />
+        <Route path="analytics" element={<AnalyticsPage />} />
         <Route path="conversations" element={<ConversationsPage />} />
         <Route path="learning" element={<ComingSoonPage tab="learning" />} />
         <Route path="api" element={<ComingSoonPage tab="api" />} />

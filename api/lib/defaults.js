@@ -243,3 +243,43 @@ export const CLAUDE_MODELS = [
   { value: "claude-sonnet-5", content: "Claude Sonnet 5 — balanced (recommended)" },
   { value: "claude-haiku-4-5", content: "Claude Haiku 4.5 — fastest & cheapest" },
 ];
+
+// ─────────────────────────── analytics ───────────────────────────
+
+// Anthropic list prices, USD per million tokens (input / output), first-party
+// API, as of 2026-10. Longest matching prefix wins, so dated or suffixed model
+// ids still resolve. Models not listed (e.g. the dev OpenAI-compatible endpoint)
+// cost null — the Analytics tab shows tokens without a dollar figure.
+export const MODEL_PRICES = {
+  "claude-fable-5": [10, 50],
+  "claude-opus-5-5": [4, 20],
+  "claude-opus-5": [5, 25],
+  "claude-opus-4": [5, 25],
+  "claude-sonnet-5": [2, 10],
+  "claude-sonnet-4-6": [3, 15],
+  "claude-sonnet-4": [3, 15],
+  "claude-haiku-5-5": [0.1, 0.5],
+  "claude-haiku-4-5": [1, 5],
+};
+
+export function modelPrice(model) {
+  const id = String(model || "").toLowerCase();
+  const key = Object.keys(MODEL_PRICES).filter((k) => id.startsWith(k)).sort((a, b) => b.length - a.length)[0];
+  return key ? MODEL_PRICES[key] : null;
+}
+
+// Cost in USD of one turn's usage; cache reads bill at 0.1× input, cache writes at 1.25×.
+export function tokenCost(model, usage) {
+  const price = modelPrice(model);
+  if (!price || !usage) return null;
+  const [inp, out] = price;
+  const m = 1e6;
+  return (
+    ((usage.input || 0) * inp + (usage.cacheRead || 0) * inp * 0.1 + (usage.cacheWrite || 0) * inp * 1.25 + (usage.output || 0) * out) / m
+  );
+}
+
+// Chat tools that put products in front of the shopper (funnel stage 2).
+export const PRODUCT_TOOLS = ["search_products", "get_product_details", "get_related_products", "compare_products", "browse_categories", "get_product_reviews"];
+// Days after a chat during which an order from the shopper's own cart counts as assisted.
+export const ASSISTED_WINDOW_DAYS = 7;

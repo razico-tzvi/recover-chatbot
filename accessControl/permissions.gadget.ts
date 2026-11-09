@@ -62,6 +62,7 @@ export const permissions: GadgetPermissions = {
       },
       actions: {
         crmAdmin: true,
+        getAnalytics: true,
         getCatalog: true,
         testIntegration: true,
       },
