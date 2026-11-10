@@ -18,6 +18,7 @@ export const VOICE_MIN_REPLIES = 20;
 // Auto-seed before the backfill finishes once this many tickets are synced.
 export const VOICE_SEED_REPLIES = 200;
 const MONTHS = 12;
+const SPLIT_DEPTH = 4; // month → ~2-day windows
 const SAMPLE = 80;
 const PER_REPLY_CHARS = 1200;
 const TOTAL_CHARS = 70_000;
@@ -67,25 +68,26 @@ export function spread(list, n) {
 }
 
 async function recentReplies(api, store) {
-  // One query per month, no cursors: nextPage() on this filtered internal
-  // query failed in Gadget with GGT_INVALID_CURSOR. Up to 250 tickets a month
-  // is plenty for a style sample and keeps every month represented.
+  // Date windows instead of cursors: nextPage() on this filtered internal
+  // query failed in Gadget with GGT_INVALID_CURSOR. A window that comes back
+  // full (250, in no particular order) is split in half so the rows stay
+  // spread over time; past SPLIT_DEPTH a full window is kept as it is.
+  const query = async (from, to, depth) => {
+    const page = await api.internal.crmHistory.findMany({
+      filter: {
+        storeId: { equals: store.id },
+        ticketUpdatedAt: { greaterThanOrEqual: new Date(from).toISOString(), lessThan: new Date(to).toISOString() },
+      },
+      select: { answer: true, ticketUpdatedAt: true },
+      first: 250,
+    });
+    if (page.length < 250 || depth >= SPLIT_DEPTH) return [...page];
+    const mid = from + (to - from) / 2;
+    return [...(await query(from, mid, depth + 1)), ...(await query(mid, to, depth + 1))];
+  };
   const now = Date.now();
   const months = Array.from({ length: MONTHS }, (_, i) => [now - ((i + 1) * WINDOW_MS) / MONTHS, now - (i * WINDOW_MS) / MONTHS]);
-  const rows = (
-    await Promise.all(
-      months.map(([from, to]) =>
-        api.internal.crmHistory.findMany({
-          filter: {
-            storeId: { equals: store.id },
-            ticketUpdatedAt: { greaterThanOrEqual: new Date(from).toISOString(), lessThan: new Date(to).toISOString() },
-          },
-          select: { answer: true, ticketUpdatedAt: true },
-          first: 250,
-        })
-      )
-    )
-  ).flatMap((page) => [...page]);
+  const rows = (await Promise.all(months.map(([from, to]) => query(from, to, 0)))).flat();
   rows.sort((a, b) => new Date(b.ticketUpdatedAt).getTime() - new Date(a.ticketUpdatedAt).getTime());
   // A synced ticket can hold several agent replies joined by "---".
   return rows.flatMap((r) =>
