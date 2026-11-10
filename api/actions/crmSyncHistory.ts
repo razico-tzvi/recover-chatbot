@@ -1,14 +1,15 @@
 import { ActionOptions } from "gadget-server";
 import { storesFor, syncHistory } from "../lib/crm";
-import { seedVoiceTone } from "../lib/voice";
+import { seedVoiceTone, VOICE_SEED_REPLIES } from "../lib/voice";
 
 // Nightly: pull resolved/closed Freshdesk tickets (agent public replies only)
 // into crmHistory for every connected store. Incremental via crmState.historyCursor;
 // the first run looks back 12 months. When a run stops at Freshdesk's rate limit
 // (or the per-run cap) it schedules its own continuation for that store, up to
 // MAX_CONTINUATIONS times, instead of sleeping inside the action.
-// When a store's sync chain finishes, its Voice & tone is seeded once from the
-// stored agent replies (only while the block is still the built-in default).
+// Once a store's sync chain finishes (or it has VOICE_SEED_REPLIES tickets stored),
+// its Voice & tone is seeded once from the stored agent replies — only while the
+// block is still the built-in default.
 const MAX_CONTINUATIONS = 20;
 
 export const run: ActionRun = async ({ params, api, logger }) => {
@@ -27,7 +28,11 @@ export const run: ActionRun = async ({ params, api, logger }) => {
           { startAt: new Date(Date.now() + delayS * 1000).toISOString() }
         );
         logger.info({ storeId: store.id, delayS, continuation: continuation + 1, saved: r.saved }, "crm history sync continues later");
-      } else if (!r.skipped && !r.error && !r.retryAfter && !r.more) {
+      }
+      // A rate-limited backfill can take days to catch up, so a store that
+      // already has plenty of replies is seeded without waiting for it.
+      const caughtUp = !r.retryAfter && !r.more;
+      if (!r.skipped && !r.error && (caughtUp || (store.crmState?.historyCount || 0) >= VOICE_SEED_REPLIES) && !store.crmState?.voiceSeed && !String(store.voiceTone || "").trim()) {
         try {
           results[`${store.id}:voice`] = await seedVoiceTone(ctx, store);
         } catch (err: any) {

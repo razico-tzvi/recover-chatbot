@@ -4,7 +4,8 @@
 // generateVoiceTone — reads the last 12 months of stored agent replies, samples
 //                     them evenly over time and asks the store's analysis model
 //                     for a style guide. Returns the text; never saves it.
-// seedVoiceTone     — one-time: after a history sync finishes, a store whose
+// seedVoiceTone     — one-time: after a history sync finishes (or once enough
+//                     tickets are synced), a store whose
 //                     Voice & tone is still the built-in default gets the
 //                     generated guide saved. Never overwrites an edited block
 //                     and never runs again once crmState.voiceSeed is set.
@@ -14,6 +15,8 @@ import { saveState } from "./crm";
 
 const WINDOW_MS = 365 * 24 * 3600 * 1000;
 export const VOICE_MIN_REPLIES = 20;
+// Auto-seed before the backfill finishes once this many tickets are synced.
+export const VOICE_SEED_REPLIES = 200;
 const MAX_ROWS = 2000;
 const SAMPLE = 80;
 const PER_REPLY_CHARS = 1200;
