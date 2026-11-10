@@ -69,8 +69,9 @@ async function recentReplies(api, store) {
   const since = new Date(Date.now() - WINDOW_MS).toISOString();
   const rows = [];
   let page = await api.internal.crmHistory.findMany({
+    // No sort: Gadget rejects nextPage() cursors on a dateTime sort
+    // (GGT_INVALID_CURSOR). Rows are ordered in memory below.
     filter: { storeId: { equals: store.id }, ticketUpdatedAt: { greaterThanOrEqual: since } },
-    sort: { ticketUpdatedAt: "Descending" },
     select: { answer: true, ticketUpdatedAt: true },
     first: 250,
   });
@@ -79,6 +80,7 @@ async function recentReplies(api, store) {
     page = await page.nextPage();
     rows.push(...page);
   }
+  rows.sort((a, b) => new Date(b.ticketUpdatedAt).getTime() - new Date(a.ticketUpdatedAt).getTime());
   // A synced ticket can hold several agent replies joined by "---".
   return rows.flatMap((r) =>
     String(r.answer || "")
