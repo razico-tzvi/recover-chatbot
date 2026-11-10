@@ -93,6 +93,10 @@ setup (ggt dev + `stencil start` + the script tag in
   syncs agent replies. Only tickets created after the mode left Off are
   touched. Don't run Check now / Live mode against a real helpdesk without
   the store owner's OK — it posts notes/replies on customer tickets.
+- `api/lib/voice.js` — Voice & tone (context source 8) generated from the
+  agent replies in `crmHistory` (last 12 months): seeded once after a history
+  sync while the block is still the default, or on demand via Context ›
+  Voice & tone › Generate from tickets (fills the editor, saved with settings).
 - `api/lib/analytics.js` — Analytics tab (phase 3a): `getAnalytics` aggregates
   per store; `syncOrders` cron (hourly) credits BigCommerce orders to chats by
   cart id (direct = bot-built cart, assisted = shopper's own cart within 7 days).

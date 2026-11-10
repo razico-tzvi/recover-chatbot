@@ -3,6 +3,7 @@ import { resolveCrm } from "../lib/defaults";
 import { freshdesk, freshdeskConnected } from "../lib/integrations";
 import { llmConfig } from "../lib/llm";
 import { draftReply, processTicket, withSignature } from "../lib/crm";
+import { generateVoiceTone } from "../lib/voice";
 
 // CRM tab operations. The store always comes from the session's BigCommerce
 // context, never from params.
@@ -10,6 +11,8 @@ import { draftReply, processTicket, withSignature } from "../lib/crm";
 //   syncNow   — queue a ticket-history sync for this store
 //   preview   — draft a reply to pasted text; nothing is posted to Freshdesk
 //   retry     — re-run a ticket that ended in "error"
+//   voiceTone — generate Voice & tone from the synced agent replies; returned
+//               to the Context tab's editor, saved only with the settings
 export const run: ActionRun = async ({ params, api, connections, logger }) => {
   const storeHash = connections.bigcommerce.currentStoreHash;
   if (!storeHash) throw new Error("No store in context.");
@@ -56,6 +59,16 @@ export const run: ActionRun = async ({ params, api, connections, logger }) => {
       return { ok: out?.action !== "error", message: out?.action === "error" ? `Failed again: ${out.reason}` : `Done: ${out?.action}.` };
     }
 
+    case "voiceTone": {
+      try {
+        const g = await generateVoiceTone(ctx, store);
+        return { ok: true, text: g.text, basedOn: g.basedOn, model: g.model };
+      } catch (err: any) {
+        logger.warn({ err, storeId: store.id }, "voice & tone generation failed");
+        return { ok: false, message: err?.message || "Generation failed." };
+      }
+    }
+
     default:
       return { ok: false, message: "Unknown operation." };
   }
@@ -70,5 +83,5 @@ export const params = {
 
 export const options: ActionOptions = {
   triggers: { api: true },
-  timeoutMS: 120000,
+  timeoutMS: 330000,
 };

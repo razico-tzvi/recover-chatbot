@@ -127,7 +127,7 @@ function ModeCard() {
         <div>
           <div className="ghead">Ticket history</div>
           <p>{(st.historyCount ?? 0).toLocaleString()} resolved tickets synced · last sync {fmt(st.lastSyncAt)}</p>
-          <p className="hint">Nightly, agent public replies only. The first sync looks back 90 days.</p>
+          <p className="hint">Nightly, agent public replies only. The first sync looks back 12 months; Voice &amp; tone is seeded from it once.</p>
           <div className="row" style={{ marginTop: 8 }}>
             <Btn small loading={busy === "syncNow"} onClick={() => op("syncNow")}>Sync now</Btn>
           </div>

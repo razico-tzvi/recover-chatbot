@@ -6,7 +6,7 @@
 // collectFeedback — for drafts, the reply an agent actually sent is stored with
 //                 a similarity score; edited drafts are shown to later drafts.
 // syncHistory   — nightly: resolved/closed tickets → agent public replies only,
-//                 used as reference answers.
+//                 used as reference answers and to seed Voice & tone (voice.js).
 
 import {
   CRM_GUARDRAILS, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
@@ -22,7 +22,8 @@ const MAX_NEW_PER_RUN = 10;
 const MAX_FEEDBACK_PER_RUN = 20;
 const FEEDBACK_WINDOW_MS = 14 * 24 * 3600 * 1000;
 const FEEDBACK_RECHECK_MS = 60 * 60 * 1000;
-const HISTORY_FIRST_SYNC_MS = 90 * 24 * 3600 * 1000;
+// 12 months: Voice & tone is seeded from the last year of agent replies.
+const HISTORY_FIRST_SYNC_MS = 365 * 24 * 3600 * 1000;
 const MAX_HISTORY_PER_RUN = 150;
 const HISTORY_BUDGET_SHARE = 0.4;
 
@@ -37,7 +38,7 @@ export async function storesFor(api, storeId) {
   return api.internal.bigcommerce.store.findMany({ filter, first: 250 });
 }
 
-async function saveState(api, store, patch) {
+export async function saveState(api, store, patch) {
   const crmState = { ...(store.crmState || {}), ...patch };
   store.crmState = crmState;
   await api.internal.bigcommerce.store.update(store.id, { crmState });

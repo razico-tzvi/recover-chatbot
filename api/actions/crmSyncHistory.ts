@@ -1,11 +1,14 @@
 import { ActionOptions } from "gadget-server";
 import { storesFor, syncHistory } from "../lib/crm";
+import { seedVoiceTone } from "../lib/voice";
 
 // Nightly: pull resolved/closed Freshdesk tickets (agent public replies only)
 // into crmHistory for every connected store. Incremental via crmState.historyCursor;
-// the first run looks back 90 days. When a run stops at Freshdesk's rate limit
+// the first run looks back 12 months. When a run stops at Freshdesk's rate limit
 // (or the per-run cap) it schedules its own continuation for that store, up to
 // MAX_CONTINUATIONS times, instead of sleeping inside the action.
+// When a store's sync chain finishes, its Voice & tone is seeded once from the
+// stored agent replies (only while the block is still the built-in default).
 const MAX_CONTINUATIONS = 20;
 
 export const run: ActionRun = async ({ params, api, logger }) => {
@@ -24,6 +27,12 @@ export const run: ActionRun = async ({ params, api, logger }) => {
           { startAt: new Date(Date.now() + delayS * 1000).toISOString() }
         );
         logger.info({ storeId: store.id, delayS, continuation: continuation + 1, saved: r.saved }, "crm history sync continues later");
+      } else if (!r.skipped && !r.error && !r.retryAfter && !r.more) {
+        try {
+          results[`${store.id}:voice`] = await seedVoiceTone(ctx, store);
+        } catch (err: any) {
+          logger.info({ storeId: store.id, reason: err?.message }, "voice & tone not seeded");
+        }
       }
     } catch (err) {
       logger.error({ err, storeId: store.id }, "crmSyncHistory failed for store");

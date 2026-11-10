@@ -36,6 +36,7 @@ export const ContextPage = () => {
   const [busy, setBusy] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [showGuardrails, setShowGuardrails] = useState(false);
+  const [voiceGen, setVoiceGen] = useState<{ tone: "good" | "crit"; text: string } | null>(null);
   const navigate = useNavigate();
 
   const loadCatalogCount = async () => {
@@ -63,6 +64,28 @@ export const ContextPage = () => {
     // @ts-ignore — global action
     const r = await api.getCatalog({ full: true });
     return r.products as Record<string, unknown>[];
+  };
+
+  // Fills the editor only; the admin reviews it and saves with the other settings.
+  const generateVoice = async () => {
+    setBusy("voice-gen");
+    setVoiceGen(null);
+    try {
+      // @ts-ignore — global action
+      const r = await api.crmAdmin({ op: "voiceTone" });
+      if (r?.ok && r.text) {
+        set("voiceTone", r.text);
+        setEditing("voiceTone");
+        const b = r.basedOn || {};
+        const range = b.from && b.to ? ` (${new Date(b.from).toLocaleDateString()} – ${new Date(b.to).toLocaleDateString()})` : "";
+        setVoiceGen({ tone: "good", text: `Generated from ${b.sampled} of ${b.replies} agent replies${range}. Review it below, then Save settings.` });
+      } else {
+        setVoiceGen({ tone: "crit", text: r?.message || "Generation failed." });
+      }
+    } catch (e: any) {
+      setVoiceGen({ tone: "crit", text: e?.message || "Generation failed." });
+    }
+    setBusy(null);
   };
 
   const exportSource = (s: Source, format: "csv" | "json") =>
@@ -124,6 +147,8 @@ export const ContextPage = () => {
     if (s.id === "faq") parts.push(`${draft.faq.split(/\n(?=## )/).filter((x) => x.trim()).length} topics`);
     else if (s.field) parts.push(`${draft[s.field].length.toLocaleString()} chars`);
     if (s.field && store?.updatedAt) parts.push(`saved ${new Date(store.updatedAt).toLocaleDateString()}`);
+    const seed = store?.crmState?.voiceSeed;
+    if (s.id === "voice" && seed?.at && store?.voiceTone?.trim()) parts.push(`seeded from ${(seed.replies ?? 0).toLocaleString()} agent replies on ${new Date(seed.at).toLocaleDateString()}`);
     if (s.id === "freshdesk" && store?.crmState?.lastSyncAt) {
       parts.push(`${(store.crmState.historyCount ?? 0).toLocaleString()} tickets`, `synced ${new Date(store.crmState.lastSyncAt).toLocaleDateString()}`);
     }
@@ -149,6 +174,9 @@ export const ContextPage = () => {
       return (
         <>
           <Btn small onClick={() => setEditing(editing === s.field ? null : s.field!)}>{editing === s.field ? "Close" : "Edit"}</Btn>
+          {s.id === "voice" && freshdeskConnected(store) && (
+            <Btn small loading={busy === "voice-gen"} onClick={generateVoice} title="Analyze the agent replies synced from Freshdesk in the last 12 months">Generate from tickets</Btn>
+          )}
           {exportBtns(s)}
         </>
       );
@@ -189,6 +217,7 @@ export const ContextPage = () => {
               {status(s)}
               {actions(s)}
             </div>
+            {s.id === "voice" && voiceGen && <Alert tone={voiceGen.tone}>{voiceGen.text}</Alert>}
             {s.field && editing === s.field && (
               <div className="editor">
                 <textarea
