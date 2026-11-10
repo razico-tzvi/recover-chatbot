@@ -17,7 +17,7 @@ const WINDOW_MS = 365 * 24 * 3600 * 1000;
 export const VOICE_MIN_REPLIES = 20;
 // Auto-seed before the backfill finishes once this many tickets are synced.
 export const VOICE_SEED_REPLIES = 200;
-const MAX_ROWS = 2000;
+const MONTHS = 12;
 const SAMPLE = 80;
 const PER_REPLY_CHARS = 1200;
 const TOTAL_CHARS = 70_000;
@@ -38,6 +38,7 @@ Cover only style, for example:
 Rules:
 - Describe the team's shared style. If agents differ, describe what most of them do.
 - No facts or policies (prices, time frames, shipping, returns, warranty, legal): those live in a separate FAQ section.
+- Quoted phrases must not contain numbers, time frames, prices or policy details — replace them with "…".
 - No names of agents or customers, no order numbers, emails, phone numbers or links.
 - Nothing about signatures or sign-offs: a signature is added automatically.
 - Write it as 6 to 12 short bullet points ("- ..."), imperative, addressed to the assistant ("Open with...", "Keep..."). You may quote a short typical phrase. No headings, no preamble.
@@ -66,20 +67,25 @@ export function spread(list, n) {
 }
 
 async function recentReplies(api, store) {
-  const since = new Date(Date.now() - WINDOW_MS).toISOString();
-  const rows = [];
-  let page = await api.internal.crmHistory.findMany({
-    // No sort: Gadget rejects nextPage() cursors on a dateTime sort
-    // (GGT_INVALID_CURSOR). Rows are ordered in memory below.
-    filter: { storeId: { equals: store.id }, ticketUpdatedAt: { greaterThanOrEqual: since } },
-    select: { answer: true, ticketUpdatedAt: true },
-    first: 250,
-  });
-  rows.push(...page);
-  while (page.hasNextPage && rows.length < MAX_ROWS) {
-    page = await page.nextPage();
-    rows.push(...page);
-  }
+  // One query per month, no cursors: nextPage() on this filtered internal
+  // query failed in Gadget with GGT_INVALID_CURSOR. Up to 250 tickets a month
+  // is plenty for a style sample and keeps every month represented.
+  const now = Date.now();
+  const months = Array.from({ length: MONTHS }, (_, i) => [now - ((i + 1) * WINDOW_MS) / MONTHS, now - (i * WINDOW_MS) / MONTHS]);
+  const rows = (
+    await Promise.all(
+      months.map(([from, to]) =>
+        api.internal.crmHistory.findMany({
+          filter: {
+            storeId: { equals: store.id },
+            ticketUpdatedAt: { greaterThanOrEqual: new Date(from).toISOString(), lessThan: new Date(to).toISOString() },
+          },
+          select: { answer: true, ticketUpdatedAt: true },
+          first: 250,
+        })
+      )
+    )
+  ).flatMap((page) => [...page]);
   rows.sort((a, b) => new Date(b.ticketUpdatedAt).getTime() - new Date(a.ticketUpdatedAt).getTime());
   // A synced ticket can hold several agent replies joined by "---".
   return rows.flatMap((r) =>
