@@ -2,7 +2,7 @@ import { RouteHandler } from "gadget-server";
 import {
   GUARDRAILS, DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
   resolveBranding, resolveFeatures, resolveSafeguards, enabledTools, tokenCost, PRODUCT_TOOLS,
-  resolveCrm, matchBlocklist,
+  resolveCrm, matchBlocklist, mergeTopics, UNANSWERED_RE, questionKey,
 } from "../lib/defaults";
 import { freshdeskConnected, createFreshdeskTicket } from "../lib/integrations";
 
@@ -77,7 +77,7 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
       await persistTurn(api, {
         storeId: store.id, sessionId, userText: String(lastUser.content || ""), userImages: lastUser.images,
         assistantText: blocked.response, provider, model, ip, toolsUsed: [],
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, storefrontCartId, playbookVersion,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, storefrontCartId, playbookVersion, blocked: true,
       });
     } catch (err) {
       logger.error({ err }, "persist turn failed");
@@ -103,10 +103,11 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
   let assistantText = "";
   const toolsUsed = [];
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  const signals = { products: [], coupons: [], shippingEstimates: 0, faqMisses: [] };
   try {
     await runChatStream({
       provider, baseUrl, model, apiKey, messages, bc, logger, system, tools, allowed,
-      api, sessionId, storeHash, store, emails, ip, safeguards, toolsUsed, usage,
+      api, sessionId, storeHash, store, emails, ip, safeguards, toolsUsed, usage, signals,
       onDelta: (t) => { if (t) { assistantText += t; write({ type: "delta", text: t }); } },
     });
     write({ type: "done" });
@@ -121,6 +122,7 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
     await persistTurn(api, {
       storeId: store.id, sessionId, userText: String(lastUser.content || ""),
       userImages: lastUser.images, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId, playbookVersion,
+      signals, blocked: !!blocked,
     });
   } catch (err) {
     logger.error({ err }, "persist turn failed");
@@ -435,7 +437,7 @@ function anthropicContent(m) {
 // Store the user message + assistant reply and upsert the session summary,
 // so the app's Conversations view can list sessions and show transcripts. The
 // user message keeps the IP (per-IP rate limits); the reply keeps the tools used.
-async function persistTurn(api, { storeId, sessionId, userText, userImages, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId, playbookVersion }) {
+async function persistTurn(api, { storeId, sessionId, userText, userImages, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId, playbookVersion, signals, blocked }) {
   if (!sessionId || !storeId) return;
   const imgs = Array.isArray(userImages) && userImages.length ? userImages : null;
   if (userText || imgs) {
@@ -459,6 +461,7 @@ async function persistTurn(api, { storeId, sessionId, userText, userImages, assi
     ...(used.some((t) => PRODUCT_TOOLS.includes(t)) ? { productsShown: true } : {}),
     ...(used.includes("add_to_cart") ? { addedToCart: true } : {}),
     ...(storefrontCartId ? { storefrontCartId } : {}),
+    ...turnSignals(row, { userText, assistantText, used, signals, blocked }),
   });
   const row = await findSession(api, storeId, sessionId);
   if (row) {
@@ -469,6 +472,44 @@ async function persistTurn(api, { storeId, sessionId, userText, userImages, assi
   } else {
     await api.internal.chatSession.create({ sessionId, storeId, preview: (userText || "(image)").slice(0, 140), messageCount: added, provider, model, playbookVersion, ...stats(null) });
   }
+}
+
+// Merge this turn's Analytics signals into the session row's lists (bounded).
+// Only fields that change are returned, so older rows stay null until they do.
+function turnSignals(row, { userText, assistantText, used, signals, blocked }) {
+  const out = {};
+  const sig = signals || { products: [], coupons: [], shippingEstimates: 0, faqMisses: [] };
+
+  if (sig.products.length) {
+    const prev = Array.isArray(row?.productsAsked) ? row.productsAsked : [];
+    const merged = [...prev];
+    for (const p of sig.products) {
+      const at = merged.findIndex((x) => x.id === p.id);
+      if (at < 0) merged.push(p);
+      else if (!merged[at].name && p.name) merged[at] = p;
+    }
+    out.productsAsked = merged.slice(0, 30);
+  }
+  if (sig.coupons.length) out.couponsTried = [...(Array.isArray(row?.couponsTried) ? row.couponsTried : []), ...sig.coupons].slice(-20);
+  if (sig.shippingEstimates) out.shippingEstimates = (row?.shippingEstimates || 0) + sig.shippingEstimates;
+
+  // FAQ gap list: FAQ searches with no match, and replies where the bot said it
+  // couldn't answer (the shopper's question is recorded). Blocked topics are deliberate.
+  if (!blocked) {
+    const gaps = [...sig.faqMisses];
+    const q = String(userText || "").trim();
+    if (q && UNANSWERED_RE.test(assistantText || "")) gaps.push(q.slice(0, 200));
+    if (gaps.length) {
+      const prev = Array.isArray(row?.unanswered) ? row.unanswered : [];
+      const seen = new Set(prev.map(questionKey));
+      const add = gaps.filter((g) => { const k = questionKey(g); if (!k || seen.has(k)) return false; seen.add(k); return true; });
+      if (add.length) out.unanswered = [...prev, ...add].slice(-10);
+    }
+  }
+
+  const topics = mergeTopics(row?.topics, userText, used);
+  if (topics && JSON.stringify(topics) !== JSON.stringify(row?.topics || null)) out.topics = topics;
+  return out;
 }
 
 async function findSession(api, storeId, sessionId) {
@@ -556,7 +597,7 @@ async function runChatStream(opts) {
   const ctx = {
     bc: opts.bc, logger: opts.logger, api: opts.api, sessionId: opts.sessionId,
     storeHash: opts.storeHash, store: opts.store, emails: opts.emails,
-    ip: opts.ip, safeguards: opts.safeguards, allowed: opts.allowed, toolsUsed: opts.toolsUsed,
+    ip: opts.ip, safeguards: opts.safeguards, allowed: opts.allowed, toolsUsed: opts.toolsUsed, signals: opts.signals,
     usage: opts.usage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
   };
   const common = { model: opts.model, apiKey: opts.apiKey, messages: opts.messages, system: opts.system, tools: opts.tools, ctx, onDelta: opts.onDelta };
@@ -692,47 +733,14 @@ async function runAnthropicStream({ model, apiKey, messages, system, tools: open
 // ─────────────────────────── tools ───────────────────────────
 
 async function runTool(name, input, ctx) {
-  const { bc, logger } = ctx;
+  const { logger } = ctx;
   // Defense in depth: disabled tools aren't offered, and are refused if called anyway.
   if (ctx.allowed && !ctx.allowed.has(name)) return JSON.stringify({ error: `The ${name} tool is not available.` });
   if (ctx.toolsUsed && !ctx.toolsUsed.includes(name)) ctx.toolsUsed.push(name);
   try {
-    switch (name) {
-      case "search_products":
-        return await searchProducts(bc, input, ctx);
-      case "get_product_details":
-        return await getProductDetails(bc, input, ctx);
-      case "add_to_cart":
-        return await addToCart(bc, input, ctx);
-      case "view_cart":
-        return await viewCart(bc, ctx);
-      case "update_cart_item":
-        return await updateCartItem(bc, input, ctx);
-      case "remove_from_cart":
-        return await removeFromCart(bc, input, ctx);
-      case "apply_coupon":
-        return await applyCoupon(bc, input, ctx);
-      case "get_shipping_estimate":
-        return await getShippingEstimate(bc, input, ctx);
-      case "get_related_products":
-        return await getRelatedProducts(bc, input, ctx);
-      case "compare_products":
-        return await compareProducts(bc, input, ctx);
-      case "browse_categories":
-        return await browseCategories(bc, input, ctx);
-      case "get_product_reviews":
-        return await getProductReviews(bc, input);
-      case "get_promotions":
-        return await getPromotions(bc);
-      case "lookup_order":
-        return await lookupOrder(bc, input, ctx);
-      case "search_faq":
-        return searchFaq(input.query || "", storeFaq(ctx.store));
-      case "escalate_to_human":
-        return await escalateToHuman(input, ctx);
-      default:
-        return JSON.stringify({ error: `Unknown tool: ${name}` });
-    }
+    const out = await dispatchTool(name, input, ctx);
+    try { noteSignals(name, input, out, ctx.signals); } catch (e) {}
+    return out;
   } catch (err) {
     logger?.error({ err, tool: name }, "tool failed");
     const status = errorStatus(err);
@@ -743,6 +751,79 @@ async function runTool(name, input, ctx) {
       });
     }
     return JSON.stringify({ error: "That request failed. Do not retry the same call more than once; apologize and suggest trying again later." });
+  }
+}
+
+// Analytics signals from a tool result (Analytics › Sales): products the shopper
+// asked about, coupons tried, shipping quotes given, FAQ questions with no answer.
+function noteSignals(name, input, out, signals) {
+  if (!signals) return;
+  const r = safeJson(out);
+  if (r.error) return;
+  const product = (id, pname) => {
+    const pid = Number(id);
+    if (!pid || signals.products.some((p) => p.id === pid)) return;
+    signals.products.push({ id: pid, name: String(pname || "").slice(0, 200) || null });
+  };
+  switch (name) {
+    case "get_product_details": product(r.id, r.name); break;
+    case "get_product_reviews": product(input.product_id, r.product); break;
+    case "get_related_products": product(input.product_id, r.for); break;
+    case "compare_products": (r.products || []).forEach((p) => product(p.id, p.name)); break;
+    case "add_to_cart": if (r.added) product(input.product_id, null); break;
+    case "apply_coupon":
+      signals.coupons.push({
+        code: String(input.coupon_code || "").trim().slice(0, 60),
+        applied: !!r.applied,
+        discount: r.applied && Number(r.discount) > 0 ? Number(r.discount) : 0,
+        currency: r.currency || "",
+      });
+      break;
+    case "get_shipping_estimate": if (Array.isArray(r.options) && r.options.length) signals.shippingEstimates++; break;
+    default: break;
+  }
+  if (name === "search_faq" && /^No matching policy section/.test(String(out || "")) && input.query) {
+    signals.faqMisses.push(String(input.query).slice(0, 200));
+  }
+}
+
+async function dispatchTool(name, input, ctx) {
+  const { bc } = ctx;
+  switch (name) {
+    case "search_products":
+      return await searchProducts(bc, input, ctx);
+    case "get_product_details":
+      return await getProductDetails(bc, input, ctx);
+    case "add_to_cart":
+      return await addToCart(bc, input, ctx);
+    case "view_cart":
+      return await viewCart(bc, ctx);
+    case "update_cart_item":
+      return await updateCartItem(bc, input, ctx);
+    case "remove_from_cart":
+      return await removeFromCart(bc, input, ctx);
+    case "apply_coupon":
+      return await applyCoupon(bc, input, ctx);
+    case "get_shipping_estimate":
+      return await getShippingEstimate(bc, input, ctx);
+    case "get_related_products":
+      return await getRelatedProducts(bc, input, ctx);
+    case "compare_products":
+      return await compareProducts(bc, input, ctx);
+    case "browse_categories":
+      return await browseCategories(bc, input, ctx);
+    case "get_product_reviews":
+      return await getProductReviews(bc, input);
+    case "get_promotions":
+      return await getPromotions(bc);
+    case "lookup_order":
+      return await lookupOrder(bc, input, ctx);
+    case "search_faq":
+      return searchFaq(input.query || "", storeFaq(ctx.store));
+    case "escalate_to_human":
+      return await escalateToHuman(input, ctx);
+    default:
+      return JSON.stringify({ error: `Unknown tool: ${name}` });
   }
 }
 

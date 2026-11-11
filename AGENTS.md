@@ -101,6 +101,11 @@ setup (ggt dev + `stencil start` + the script tag in
   per store; `syncOrders` cron (hourly) credits BigCommerce orders to chats by
   cart id (direct = bot-built cart, assisted = shopper's own cart within 7 days).
   Token cost uses `MODEL_PRICES` in `defaults.js` — add new models there.
+  The same sync keeps the site baseline (`analyticsState.siteDaily`) for chat
+  AOV vs. site AOV. Per-chat signals (products asked about, coupons, shipping
+  quotes, unanswered questions, support topics) are recorded by `persistTurn` /
+  `noteSignals` in `POST-chat.js`; checkout-link clicks come from the widget via
+  `POST /event`. Ranges: presets or custom from/to + optional comparison period.
 - `api/lib/learning.js` — Learning tab (sales learning loop): `learningLoop`
   cron (daily) proposes a `salesPlaybook` version once the window since the
   last proposal has 250 settled chats / 25 conversions (editable); an admin

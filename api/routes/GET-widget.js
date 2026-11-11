@@ -277,6 +277,20 @@ function widgetSource() {
   else if (VISION) ph = "Type or upload an image";
   inputEl.placeholder = ph;
 
+  // Analytics funnel: a click on a cart/checkout link in a bot reply.
+  listEl.addEventListener("click", function (e) {
+    var a = e.target && e.target.closest ? e.target.closest(".msg.assistant a") : null;
+    if (!a || !/\/cart\.php|\/checkout(\/|\?|#|$)/i.test(a.getAttribute("href") || "")) return;
+    try {
+      fetch(apiBase + "/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        keepalive: true,
+        body: JSON.stringify({ storeHash: store, sessionId: sessionId(), event: "checkout_click" })
+      }).catch(function () {});
+    } catch (err) {}
+  });
+
   panel.querySelector(".close").addEventListener("click", toggle);
   panel.querySelector(".menu").addEventListener("click", resetChat);
   inputEl.addEventListener("input", updateVoiceBtn);

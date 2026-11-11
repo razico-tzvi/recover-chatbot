@@ -123,7 +123,8 @@ export const ApiPage = () => {
           previous response's <span className="mono">nextCursor</span> to get the next page (<span className="mono">null</span> = last page).
           Conversations also take <span className="mono">needsHuman=true</span>, <span className="mono">flagged=true</span>, <span className="mono">converted=true</span>;
           feedback takes <span className="mono">source=ratings|crm</span>; safety events take <span className="mono">kind</span>; analytics takes{" "}
-          <span className="mono">days</span> (1–90).
+          <span className="mono">days</span> (1–366, ending today) or <span className="mono">from</span> / <span className="mono">to</span> (YYYY-MM-DD, UTC, inclusive),
+          plus <span className="mono">compare=true</span> for the period before.
         </p>
         <div className="ghead">Errors</div>
         <p className="hint" style={{ marginTop: 0 }}>

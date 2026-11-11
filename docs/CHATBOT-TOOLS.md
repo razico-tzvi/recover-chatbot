@@ -28,7 +28,7 @@ current store only), model `apiKey`, `web/routes/api.tsx`. Scope list
 |---|---|
 | Keys | `rak_` + 32 random bytes (base64url). Only the SHA-256 (`keyHash`) and a display `prefix` are stored; the secret is shown once at creation. Each key has a **label**, **scopes** (resources), optional **expiry** (30/90/180/365 days or never). Max 20 active per store. **Revoke** is immediate; revoked/expired keys can then be removed. `lastUsedAt` is updated at most once a minute. |
 | Auth | `Authorization: Bearer rak_…` (or `X-Api-Key`). 401 missing/invalid/expired/revoked, 403 missing scope, 400 bad query, 404 unknown conversation; body `{"error": "…"}`. The store is always the key's store. |
-| Endpoints (all GET) | `/v1/me` (any key) · `/v1/conversations`, `/v1/conversations/{sessionId}` (conversations) · `/v1/analytics?days=` (analytics, same numbers as the tab) · `/v1/context` (context) · `/v1/feedback?source=ratings\|crm` (feedback) · `/v1/learning` (learning) · `/v1/settings` (settings) · `/v1/safety-events?kind=` (safety) |
+| Endpoints (all GET) | `/v1/me` (any key) · `/v1/conversations`, `/v1/conversations/{sessionId}` (conversations) · `/v1/analytics?days=` or `?from=&to=`, `&compare=true` (analytics, same numbers as the tab) · `/v1/context` (context) · `/v1/feedback?source=ratings\|crm` (feedback) · `/v1/learning` (learning) · `/v1/settings` (settings) · `/v1/safety-events?kind=` (safety) |
 | Lists | Newest first; `limit` (1–200, default 50), `since` / `until` (ISO, on createdAt), `cursor` = previous page's `nextCursor` (createdAt of its last row; `null` on the last page). Conversations also filter on `needsHuman`, `flagged`, `converted` (`=true`). |
 | Never returned | Shopper IPs, LLM/Freshdesk/ShipStation keys, the handoff webhook URL (only `webhookConfigured`), key hashes. |
 
@@ -40,15 +40,24 @@ settings) are not built.
 Code: `api/lib/analytics.js` (order attribution + dashboard numbers),
 `api/actions/getAnalytics.ts` (tab data, current store only),
 `api/actions/syncOrders.ts` (cron `17 * * * *`), `api/routes/POST-feedback.js`
-(widget rating), `web/routes/analytics.tsx`.
+(widget rating), `api/routes/POST-event.js` (widget checkout-link clicks),
+`web/routes/analytics.tsx`. Topic and unanswered-question rules live in
+`defaults.js` (`SUPPORT_TOPICS`, `mergeTopics`, `UNANSWERED_RE`).
 
 | What | How it's recorded |
 |---|---|
 | Conversations, messages | `chatSession` rows with `messageCount > 0` (flag-only rows are excluded) |
 | Containment | share of conversations without `handoffAt` |
 | Satisfaction | widget "Was this helpful? 👍 👎" under the latest reply → `POST /feedback` → `chatSession.rating` (1 / -1, last one wins, one per session in the widget) |
-| AI cost | `POST /chat` sums streamed usage per turn (Anthropic `message_start` / `message_delta`; OpenAI-compatible `stream_options.include_usage`) into `inputTokens` / `outputTokens`, and `costUsd` priced at the turn's model from `MODEL_PRICES` in `api/lib/defaults.js` (list prices, 2026-10). Unknown models (dev endpoint) show tokens only. CRM drafting cost is not counted yet. |
-| Funnel | `productsShown` (any of `PRODUCT_TOOLS` used), `addedToCart` (`add_to_cart` used), then orders |
+| Range & comparison | 7 / 30 / 90 days or a custom from–to (whole UTC days, up to 366); **Compare to previous period** adds the same-length period right before, shown as ▲/▼ changes on the tiles and "prev" counts on the funnel and topics |
+| AI cost | `POST /chat` sums streamed usage per turn (Anthropic `message_start` / `message_delta`; OpenAI-compatible `stream_options.include_usage`) into `inputTokens` / `outputTokens`, and `costUsd` priced at the turn's model from `MODEL_PRICES` in `api/lib/defaults.js` (list prices, 2026-10). Unknown models (dev endpoint) show tokens only. CRM drafting cost is not counted yet. **Cost by model** table: chats, tokens, tokens/chat, cost and cost/chat per `chatSession.model`. Chats from before usage tracking (2026-11-09) have null token fields and are counted as "untracked" rather than as 0 tokens. |
+| Funnel | `productsShown` (any of `PRODUCT_TOOLS` used), `addedToCart` (`add_to_cart` used), `checkoutClickedAt` (shopper clicked a `/cart.php` or `/checkout` link in a bot reply → widget `POST /event {event: "checkout_click"}`, first click wins), then orders |
+| Chat-assisted revenue & AOV vs. site | chat orders (direct + assisted, by conversation start date) against the **site baseline**: every placed order on the store per UTC day, kept by the same order sync in `analyticsState.siteDaily` (`{day: {o, c: {CUR: orders}, r: {CUR: revenue}}}`, 400 days kept). The first sync with the baseline backfills 180 days (`siteFrom`); a range before that shows how many days are covered |
+| Top products asked about | `chatSession.productsAsked` — products the bot looked up (`get_product_details`, `get_product_reviews`, `get_related_products` source, `compare_products`) or added to a cart; ranked by chats, with how many of those chats ordered |
+| Asked but unanswered (FAQ gap list) | `chatSession.unanswered` — `search_faq` queries with no matching section, plus the shopper's message when the bot's reply says it couldn't answer (`UNANSWERED_RE`). Blocked topics are excluded. Grouped by normalized text, most asked first, CSV export |
+| Coupons applied | `chatSession.couponsTried` — each `apply_coupon` call (code, applied, discount, currency): applied / rejected counts, chats, total discount, per-code table |
+| Shipping estimates | `chatSession.shippingEstimates` — `get_shipping_estimate` calls that returned at least one option |
+| Support topics | `chatSession.topics` — merged each turn from the shopper's words and the tools used (`SUPPORT_TOPICS`: order status, shipping, returns, order changes, damaged/wrong item, payment, discounts, account); a chat that used `lookup_order` / `search_faq` / `escalate_to_human` with no matching topic is "other". A chat can count under several topics |
 | Direct conversion | order whose `cart_id` is the cart the bot built (`chatCart`) |
 | Assisted conversion | order whose `cart_id` is the shopper's own storefront cart (widget reads `/api/storefront/carts` and sends `cartId` with each message → `chatSession.storefrontCartId`), placed within `ASSISTED_WINDOW_DAYS` (7) of the chat |
 | Support & safety | handoffs (open ones = `needsHuman`), flagged sessions, `safetyEvent` counts by kind, `crmTicket` counts by action and the share of drafts the agent edited (similarity < 0.9) |
@@ -58,8 +67,11 @@ cursor (`store.analyticsState.ordersCursor`; first run goes back 30 days, each
 run re-reads a 1-day overlap for orders that were still Incomplete). A session
 keeps its first conversion (`conversion`, `orderId`, `orderTotal`,
 `orderCurrency`, `convertedAt`). The tab's **Check orders now** runs the same
-sync for the current store. Ranges: 7 / 30 / 90 days, daily buckets in UTC,
-CSV export of the daily rows, table view of the chart. Incentive A/B results
+sync for the current store. Reads start at UTC midnight so each day read is
+complete and its baseline totals are overwritten. Daily buckets in UTC, CSV
+export of the daily rows, table view of the chart. `GET /v1/analytics` returns
+the same object (`?days=` or `?from=&to=`, `&compare=true`). New per-chat fields
+start filling from this release; older chats have them empty. Incentive A/B results
 are a placeholder until the closing incentive ships.
 
 ## Sales learning loop (Learning tab)
@@ -257,8 +269,8 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
 
 | Model | Change |
 |---|---|
-| `bigcommerce/store` | + `faq`, `handoffEmail`, `handoffWebhookUrl`; v2: `botName`, `widgetColor`, `greeting`, `suggestedQuestions` (json), `disclaimer`, `handoffDestination`, `features` (json), `safeguards` (json), `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `anthropicModels` (json), `freshdeskDomain`, `freshdeskApiKey`, `shipstationApiKey`, `shipstationApiSecret` (encrypted), `lastFlagAlertAt`; phase 2: `crmSettings`, `crmState` (json); phase 3a: `analyticsState` (json: `ordersCursor`, `ordersSyncedAt`); learning: `learningSettings` (json: `auto`, `minSettled`, `minConversions`), `learningState` (json: `cursor`, `activeVersion`, `lastCheckAt`, `lastRunAt`, `lastRunError`, `running`), `salesPlaybook` (live text) |
-| `chatSession` | + `needsHuman` (default false), `handoffEmail`, `handoffSummary`, `handoffAt`; v2: `flagged`, `flagReason`, `flaggedAt`; phase 3a: `inputTokens`, `outputTokens`, `costUsd`, `productsShown`, `addedToCart`, `storefrontCartId`, `rating`, `ratingAt`, `conversion` (direct/assisted), `orderId`, `orderTotal`, `orderCurrency`, `convertedAt`; learning: `playbookVersion` |
+| `bigcommerce/store` | + `faq`, `handoffEmail`, `handoffWebhookUrl`; v2: `botName`, `widgetColor`, `greeting`, `suggestedQuestions` (json), `disclaimer`, `handoffDestination`, `features` (json), `safeguards` (json), `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `anthropicModels` (json), `freshdeskDomain`, `freshdeskApiKey`, `shipstationApiKey`, `shipstationApiSecret` (encrypted), `lastFlagAlertAt`; phase 2: `crmSettings`, `crmState` (json); phase 3a: `analyticsState` (json: `ordersCursor`, `ordersSyncedAt`, `siteDaily`, `siteFrom`); learning: `learningSettings` (json: `auto`, `minSettled`, `minConversions`), `learningState` (json: `cursor`, `activeVersion`, `lastCheckAt`, `lastRunAt`, `lastRunError`, `running`), `salesPlaybook` (live text) |
+| `chatSession` | + `needsHuman` (default false), `handoffEmail`, `handoffSummary`, `handoffAt`; v2: `flagged`, `flagReason`, `flaggedAt`; phase 3a: `inputTokens`, `outputTokens`, `costUsd`, `productsShown`, `addedToCart`, `storefrontCartId`, `rating`, `ratingAt`, `conversion` (direct/assisted), `orderId`, `orderTotal`, `orderCurrency`, `convertedAt`; learning: `playbookVersion`; analytics v2: `checkoutClickedAt`, `productsAsked` (json), `couponsTried` (json), `shippingEstimates`, `unanswered` (json), `topics` (json) |
 | `chatMessage` | v2: + `ip` (user messages), `tools` (json, tools called for that reply) |
 | `stockAlert` | kept (feature removed for now) |
 | `safetyEvent` | new: `storeId`, `sessionId`, `ip`, `kind`, `detail`, `expiresAt` |

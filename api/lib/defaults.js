@@ -377,6 +377,55 @@ export function tokenCost(model, usage) {
 export const PRODUCT_TOOLS = ["search_products", "get_product_details", "get_related_products", "compare_products", "browse_categories", "get_product_reviews"];
 // Days after a chat during which an order from the shopper's own cart counts as assisted.
 export const ASSISTED_WINDOW_DAYS = 7;
+// Longest custom range the Analytics tab / GET /v1/analytics accept, in days.
+export const ANALYTICS_MAX_DAYS = 366;
+
+// Support topics (Analytics › Support topic breakdown). A conversation gets every
+// topic whose words appear in a shopper message (or whose tool the bot used), so
+// one chat can count under several topics. Chats that used a support tool but
+// match no topic count as "other".
+export const SUPPORT_TOPICS = [
+  { key: "order_status", label: "Order status & tracking", tools: ["lookup_order"],
+    re: /\b(where('?s| is) my (order|package|parcel)|order status|track(ing)?( number| my)?|has (it|my order) shipped|not (arrived|received)|hasn'?t (arrived|come))\b/i },
+  { key: "shipping", label: "Shipping & delivery", tools: ["get_shipping_estimate"],
+    re: /\b(shipping|ship (to|it)|deliver(y|ies)?|how long (does|will|to)|freight|international|ups|usps|fedex|dhl|postage)\b/i },
+  { key: "returns", label: "Returns, exchanges & refunds", tools: [],
+    re: /\b(return(s|ing)?|refund(s|ed)?|exchange|send (it|this) back|rma|money back)\b/i },
+  { key: "order_change", label: "Order changes & cancellations", tools: [],
+    re: /\b(cancel(l?ed|l?ing|lation)?|change (my|the) (order|address)|modify (my|the) order|wrong address)\b/i },
+  { key: "product_issue", label: "Damaged, defective or wrong item", tools: [],
+    re: /\b(damaged|broken|defect(ive)?|wrong (item|size|product)|missing (item|part|piece)|doesn'?t work|not working|stopped working|warranty)\b/i },
+  { key: "payment", label: "Payment & billing", tools: [],
+    re: /\b(payment|pay (with|by|in)|charged|charge on|billing|invoice|paypal|afterpay|klarna|affirm|financing|credit card|declined|receipt)\b/i },
+  { key: "discounts", label: "Discounts & coupons", tools: ["apply_coupon", "get_promotions"],
+    re: /\b(coupon|discount|promo(tion)?s?|voucher|sale|deal)\b/i },
+  { key: "account", label: "Account & login", tools: [],
+    re: /\b(my account|log ?in|sign ?in|password|create an account|reset)\b/i },
+];
+export const SUPPORT_TOOLS = ["lookup_order", "search_faq", "escalate_to_human"];
+export const SUPPORT_TOPIC_LABELS = { ...Object.fromEntries(SUPPORT_TOPICS.map((t) => [t.key, t.label])), other: "Other support" };
+
+// Topics for one turn: matched from the shopper's text and the tools the bot used.
+// `prev` is the session's topics so far; returns the merged list (null = not a support chat).
+export function mergeTopics(prev, text, tools) {
+  const used = tools || [];
+  const found = new Set((Array.isArray(prev) ? prev : []).filter((k) => k !== "other"));
+  for (const t of SUPPORT_TOPICS) {
+    if (t.re.test(String(text || "")) || t.tools.some((x) => used.includes(x))) found.add(t.key);
+  }
+  if (!found.size && ((Array.isArray(prev) && prev.includes("other")) || used.some((x) => SUPPORT_TOOLS.includes(x)))) found.add("other");
+  return found.size ? [...found] : null;
+}
+
+// Replies where the bot says it couldn't answer — the shopper's question goes on the
+// FAQ gap list (Analytics › Asked but unanswered).
+export const UNANSWERED_RE =
+  /\b(i (don'?t|do not) (have|know|see)( any)? (that |this )?(info|information|details|data)|i'?m not (sure|certain|able to (find|confirm|answer))|i (couldn'?t|could not|can'?t|cannot|wasn'?t able to) (find|confirm|answer|locate|see)|i (don'?t|do not) have (an answer|access)|(isn'?t|is not|wasn'?t|was not) (covered|listed|mentioned|specified) in|no (matching )?(information|details|policy) (on|about|for)|i (don'?t|do not) know)\b/i;
+
+// Key for grouping the same question asked in different words/case/punctuation.
+export function questionKey(q) {
+  return String(q || "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim().slice(0, 160);
+}
 
 // ─────────────────────────── REST API (API tab) ───────────────────────────
 
@@ -384,7 +433,7 @@ export const ASSISTED_WINDOW_DAYS = 7;
 // returns only the key's own store (api/lib/publicApi.js).
 export const API_SCOPES = [
   { key: "conversations", label: "Conversations", endpoints: ["GET /v1/conversations", "GET /v1/conversations/{sessionId}"], hint: "Chat sessions and full transcripts" },
-  { key: "analytics", label: "Analytics", endpoints: ["GET /v1/analytics"], hint: "Overview, funnel, support numbers and daily rows" },
+  { key: "analytics", label: "Analytics", endpoints: ["GET /v1/analytics"], hint: "Overview, cost by model, funnel, sales, support topics, daily rows and a comparison period" },
   { key: "context", label: "Context", endpoints: ["GET /v1/context"], hint: "Guidelines, FAQ, voice & tone, safeguards text, sales playbook" },
   { key: "feedback", label: "Feedback", endpoints: ["GET /v1/feedback"], hint: "Shopper ratings and CRM draft-vs-sent feedback" },
   { key: "learning", label: "Learning", endpoints: ["GET /v1/learning"], hint: "Playbook versions and their conversion stats" },

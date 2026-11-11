@@ -12,6 +12,11 @@ export const schema: GadgetModel = {
       default: false,
       storageKey: "sess-addedToCart",
     },
+    checkoutClickedAt: {
+      type: "dateTime",
+      includeTime: true,
+      storageKey: "sess-checkoutClickedAt",
+    },
     conversion: { type: "string", storageKey: "sess-conversion" },
     convertedAt: {
       type: "dateTime",
@@ -19,6 +24,7 @@ export const schema: GadgetModel = {
       storageKey: "sess-convertedAt",
     },
     costUsd: { type: "number", storageKey: "sess-costUsd" },
+    couponsTried: { type: "json", storageKey: "sess-couponsTried" },
     flagReason: { type: "string", storageKey: "sess-flagReason" },
     flagged: {
       type: "boolean",
@@ -60,6 +66,7 @@ export const schema: GadgetModel = {
       storageKey: "sess-playbookVersion",
     },
     preview: { type: "string", storageKey: "za5uSb27e-4z" },
+    productsAsked: { type: "json", storageKey: "sess-productsAsked" },
     productsShown: {
       type: "boolean",
       default: false,
@@ -73,10 +80,16 @@ export const schema: GadgetModel = {
       storageKey: "sess-ratingAt",
     },
     sessionId: { type: "string", storageKey: "HiIwekOgnTI8" },
+    shippingEstimates: {
+      type: "number",
+      storageKey: "sess-shippingEstimates",
+    },
     storeId: { type: "string", storageKey: "Og-8g_uZZONF" },
     storefrontCartId: {
       type: "string",
       storageKey: "sess-storefrontCartId",
     },
+    topics: { type: "json", storageKey: "sess-topics" },
+    unanswered: { type: "json", storageKey: "sess-unanswered" },
   },
 };

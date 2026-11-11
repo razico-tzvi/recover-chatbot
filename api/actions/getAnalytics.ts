@@ -1,7 +1,8 @@
 import { ActionOptions } from "gadget-server";
-import { storeAnalytics, syncStoreOrders } from "../lib/analytics";
+import { resolveRange, storeAnalytics, syncStoreOrders } from "../lib/analytics";
 
-// Analytics tab: the current store's numbers for the last `days` days (7–90).
+// Analytics tab: the current store's numbers for the last `days` days, or a custom
+// `from`/`to` (YYYY-MM-DD, UTC, inclusive); `compare` adds the period before it.
 // `syncOrders: true` first pulls new orders for conversion attribution
 // (otherwise the hourly syncOrders job keeps them current).
 export const run: ActionRun = async ({ params, api, connections, logger }) => {
@@ -19,12 +20,15 @@ export const run: ActionRun = async ({ params, api, connections, logger }) => {
     }
   }
 
-  const days = Math.min(90, Math.max(1, Math.round(Number(params.days) || 30)));
-  return { ...(await storeAnalytics(api, store, days)), syncError };
+  const range = resolveRange({ days: params.days, from: params.from, to: params.to, compare: params.compare });
+  return { ...(await storeAnalytics(api, store, range)), syncError };
 };
 
 export const params = {
   days: { type: "number" },
+  from: { type: "string" },
+  to: { type: "string" },
+  compare: { type: "boolean" },
   syncOrders: { type: "boolean" },
 };
 
