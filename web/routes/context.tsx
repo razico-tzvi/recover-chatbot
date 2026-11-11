@@ -183,6 +183,7 @@ export const ContextPage = () => {
     if (s.id === "freshdesk" && crmState.lastSyncAt) {
       parts.push(`${(crmState.historyCount ?? 0).toLocaleString()} tickets`, `last sync ${new Date(crmState.lastSyncAt).toLocaleString()}`);
       if (crmState.historyFrom) parts.push(`since ${new Date(crmState.historyFrom).toLocaleDateString()}`);
+      if (crmState.archive && !crmState.archive.done) parts.push(`backfilling archived tickets (${(crmState.archive.found ?? 0).toLocaleString()} found)`);
     }
     if (s.id === "catalog") {
       if (catalog.loading) parts.push("counting…");

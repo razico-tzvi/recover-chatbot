@@ -28,6 +28,10 @@ const FEEDBACK_RECHECK_MS = 60 * 60 * 1000;
 const HISTORY_FIRST_SYNC_MS = 365 * 24 * 3600 * 1000;
 const MAX_HISTORY_PER_RUN = 150;
 const HISTORY_BUDGET_SHARE = 0.4;
+// Archived-ticket backfill (syncArchived).
+const MAX_ARCHIVE_PROBES_PER_RUN = 150;
+const ARCHIVE_TOP_MARGIN = 200; // ids above the oldest listed ticket that may already be archived
+const ARCHIVE_MISS_LIMIT = 1000; // this many missing ids in a row = start of the helpdesk's ids
 
 const block = (v, fallback) => (v && String(v).trim()) || fallback;
 const clip = (s, n) => String(s || "").slice(0, n);
@@ -497,6 +501,84 @@ export async function syncHistory(ctx, store) {
   });
   await refreshHistoryCount(api, store);
   return { examined, saved, error, retryAfter, more };
+}
+
+// ─────────────────────────── archived-ticket backfill ───────────────────────────
+
+// Freshdesk archives closed tickets after a few months, and archived tickets drop
+// out of GET /tickets and search — the list-based sync above can't see them. They
+// are readable only by id (/tickets/archived/{id}), so this walks ids downward from
+// just above the oldest ticket the list still returns, saving resolved/closed ones
+// (agent public replies only, same rules as syncHistory), until it reaches a ticket
+// created before the 12-month window or ARCHIVE_MISS_LIMIT missing ids in a row.
+// Progress lives in crmState.archive; runs once per store (archive.done).
+export async function syncArchived(ctx, store) {
+  const { api, logger } = ctx;
+  if (!freshdeskConnected(store)) return { skipped: true };
+  const crm = resolveCrm(store);
+  const a = { ...(store.crmState?.archive || {}) };
+  if (a.done) return { done: true };
+  const windowStart = new Date(Date.now() - HISTORY_FIRST_SYNC_MS);
+  let probed = 0;
+  let saved = 0;
+  let retryAfter = 0;
+  let error = "";
+
+  try {
+    if (!a.nextId) {
+      const [oldest] = (await freshdesk(store, "GET", `/tickets?updated_since=${encodeURIComponent(windowStart.toISOString())}&order_by=updated_at&order_type=asc&per_page=1`)) || [];
+      if (!oldest) a.done = true;
+      else Object.assign(a, { nextId: oldest.id + ARCHIVE_TOP_MARGIN, topId: oldest.id + ARCHIVE_TOP_MARGIN, startedAt: new Date().toISOString(), scanned: 0, found: 0, misses: 0 });
+    }
+    while (!a.done && probed < MAX_ARCHIVE_PROBES_PER_RUN) {
+      if (a.nextId < 1 || a.misses >= ARCHIVE_MISS_LIMIT) { a.done = true; break; }
+      const id = a.nextId;
+      if (await findHistory(api, store, id)) { a.nextId--; a.misses = 0; continue; } // stored while it was still listed
+      const budget = freshdeskBudget(store);
+      if (budget && budget.remaining < budget.total * HISTORY_BUDGET_SHARE) throw new FreshdeskRateLimit(60);
+      probed++;
+      let t = null;
+      try {
+        t = await freshdesk(store, "GET", `/tickets/archived/${id}`);
+      } catch (err) {
+        // Not archived (live, deleted, spam) or never existed.
+        if (err instanceof FreshdeskRateLimit || !/→ (400|403|404) /.test(String(err?.message))) throw err;
+      }
+      a.scanned = (a.scanned || 0) + 1;
+      if (!t) { a.misses = (a.misses || 0) + 1; a.nextId--; continue; }
+      a.misses = 0;
+      const tags = (t.tags || []).map((x) => String(x).toLowerCase());
+      if (new Date(t.updated_at) >= windowStart && [STATUS_RESOLVED, STATUS_CLOSED].includes(t.status) && !tags.includes(crm.answeredTag)) {
+        const convos = (await freshdesk(store, "GET", `/tickets/archived/${id}/conversations?per_page=100`)) || [];
+        const answer = convos.filter(isAgentReply).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
+        if (answer.trim()) {
+          await api.internal.crmHistory.create({ storeId: store.id, ticketId: id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at });
+          saved++;
+          a.found = (a.found || 0) + 1;
+        }
+      }
+      a.nextId--;
+      // Ids are assigned in creation order: everything below is older still.
+      if (new Date(t.created_at) < windowStart) a.done = true;
+    }
+  } catch (err) {
+    if (err instanceof FreshdeskRateLimit) retryAfter = err.retryAfter || 60;
+    else {
+      error = `Archived-ticket sync failed: ${err?.message || err}`;
+      logger.warn({ err, storeId: store.id }, "crm archived history sync failed");
+    }
+  }
+
+  if (a.done && !a.doneAt) a.doneAt = new Date().toISOString();
+  await saveState(api, store, {
+    archive: a,
+    lastSyncAt: new Date().toISOString(),
+    lastSyncError: error,
+    lastSyncSaved: (store.crmState?.lastSyncSaved || 0) + saved,
+    syncPausedUntil: retryAfter ? new Date(Date.now() + (retryAfter + 5) * 1000).toISOString() : "",
+  });
+  if (saved) await refreshHistoryCount(api, store);
+  return { archive: true, probed, saved, error, retryAfter, more: !a.done && !retryAfter && !error };
 }
 
 async function findHistory(api, store, ticketId) {

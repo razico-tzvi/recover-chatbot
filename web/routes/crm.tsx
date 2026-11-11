@@ -164,6 +164,13 @@ function ModeCard() {
           <p className="hint">
             Nightly, agent public replies only, rolling 12 months{st.historyFrom ? ` (tickets updated since ${new Date(st.historyFrom).toLocaleDateString()})` : ""}. Voice &amp; tone is seeded from it once.
           </p>
+          {st.archive && (
+            <p className="hint">
+              {st.archive.done
+                ? `Archived tickets: backfill done — ${(st.archive.found ?? 0).toLocaleString()} found.`
+                : `Archived tickets (Freshdesk hides them from its ticket list): backfilling by id — at #${st.archive.nextId ?? "?"}, ${(st.archive.found ?? 0).toLocaleString()} found so far.`}
+            </p>
+          )}
           <div className="row" style={{ marginTop: 8 }}>
             <Btn small loading={busy === "syncNow"} onClick={() => op("syncNow")}>Sync now</Btn>
           </div>
