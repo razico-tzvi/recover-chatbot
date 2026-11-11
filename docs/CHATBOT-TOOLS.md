@@ -245,7 +245,13 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
   BigCommerce: **Review permissions** probes Checkouts (modify) and Information &
   Settings (read). Freshdesk: domain + API key. ShipStation: API key (+ secret
   for V1 keys). **Test connection** = `testIntegration` global action. New keys
-  are `encryptedString` fields and write-only in the UI.
+  are `encryptedString` fields and write-only in the UI. Tiles use the vendors'
+  official marks (`web/assets/integrations/`). Synced integrations show their
+  last sync on the tile and in a **Last sync** block in the panel: BigCommerce =
+  hourly order sync (`analyticsState.ordersSyncedAt`); Freshdesk = nightly ticket
+  history (`crmState.lastSyncAt`/`lastSyncError`) and, when the CRM mode isn't
+  Off, the 5-min ticket check (`crmState.lastPollAt`/`lastPollError`). Anthropic
+  and ShipStation are queried live, so they have no sync row.
 - **Features** (`web/routes/features.tsx`): a switch per feature; Closing
   incentive is shown but disabled until phase 4.
 - **CRM** (`web/routes/crm.tsx`): ticket answering, see above. Titled

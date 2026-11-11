@@ -1,21 +1,53 @@
 import { useState } from "react";
 import { api } from "../api";
-import { CLAUDE_MODELS, FEATURES } from "../../api/lib/defaults";
+import { CLAUDE_MODELS, FEATURES, resolveCrm } from "../../api/lib/defaults";
 import { freshdeskHost } from "../../api/lib/integrations";
 import { hasSecret, useSettings, type Draft } from "../lib/settings";
 import { Alert, Btn, Field, Loading, Modal, Tag } from "../components/ui";
+import anthropicLogo from "../assets/integrations/anthropic.svg";
+import bigcommerceLogo from "../assets/integrations/bigcommerce.svg";
+import freshdeskLogo from "../assets/integrations/freshdesk.svg";
+import shipstationLogo from "../assets/integrations/shipstation.png";
 
 type Id = "anthropic" | "bigcommerce" | "freshdesk" | "shipstation";
 type TestResult = { ok: boolean; message: string; missing?: string[] };
 
 const IS_DEV = process.env.GADGET_PUBLIC_APP_ENV === "development";
 
-const TILES: { id: Id; name: string; letter: string; color: string; powers: string }[] = [
-  { id: "anthropic", name: "Anthropic", letter: "A", color: "#CC785C", powers: "Powers every AI response. One key, a model per role." },
-  { id: "bigcommerce", name: "BigCommerce", letter: "B", color: "#34313F", powers: "Installed app · catalog, order lookup, carts & checkout." },
-  { id: "freshdesk", name: "Freshdesk", letter: "F", color: "#2BB24C", powers: "The connected CRM: ticket history, ticket drafting, handoff tickets." },
-  { id: "shipstation", name: "ShipStation", letter: "S", color: "#7FBA42", powers: "Carrier-level tracking events and delivery estimates for order lookups." },
+// Official vendor marks (web/assets/integrations); `bg` is the tile behind the mark.
+const TILES: { id: Id; name: string; logo: string; bg: string; powers: string }[] = [
+  { id: "anthropic", name: "Anthropic", logo: anthropicLogo, bg: "#F0EEE6", powers: "Powers every AI response. One key, a model per role." },
+  { id: "bigcommerce", name: "BigCommerce", logo: bigcommerceLogo, bg: "#FFFFFF", powers: "Installed app · catalog, order lookup, carts & checkout." },
+  { id: "freshdesk", name: "Freshdesk", logo: freshdeskLogo, bg: "#FFFFFF", powers: "The connected CRM: ticket history, ticket drafting, handoff tickets." },
+  { id: "shipstation", name: "ShipStation", logo: shipstationLogo, bg: "#FFFFFF", powers: "Carrier-level tracking events and delivery estimates for order lookups." },
 ];
+
+// "5 min ago" style; the exact time goes in a tooltip.
+function ago(iso?: string | null): string {
+  const t = iso ? Date.parse(iso) : NaN;
+  if (!Number.isFinite(t)) return "";
+  const s = Math.max(0, (Date.now() - t) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  return `${Math.floor(s / 86400)} d ago`;
+}
+
+type SyncRow = { label: string; at?: string | null; error?: string; never: string };
+
+// Integrations that pull data on a schedule; the others are queried live.
+function syncRows(id: Id, store: any): SyncRow[] {
+  if (id === "bigcommerce") {
+    return [{ label: "Orders (hourly)", at: store?.analyticsState?.ordersSyncedAt, never: "Waiting for the first hourly order sync" }];
+  }
+  if (id === "freshdesk") {
+    const c = store?.crmState || {};
+    const rows: SyncRow[] = [{ label: "Ticket history (nightly)", at: c.lastSyncAt, error: c.lastSyncError || undefined, never: "Waiting for the first history sync" }];
+    if (resolveCrm(store).mode !== "off") rows.push({ label: "New tickets (every 5 min)", at: c.lastPollAt, error: c.lastPollError || undefined, never: "Not checked yet" });
+    return rows;
+  }
+  return [];
+}
 
 // Permissions the bot's tools need on the app's OAuth token. `probed` ones are
 // checked by Review permissions (testIntegration); the rest are core install scopes.
@@ -69,6 +101,14 @@ export const IntegrationsPage = () => {
     return { text: "Setup needed", tone: "warn" };
   };
 
+  // Tile line: status, plus the latest sync for synced integrations.
+  const tileStat = (id: Id) => {
+    const st = status(id).text;
+    if (st !== "Connected") return st;
+    const last = syncRows(id, store).map((r) => r.at).filter(Boolean).sort().pop();
+    return last ? `${st} · synced ${ago(last)}` : st;
+  };
+
   const inCount = TILES.filter((t) => saved[t.id]).length;
   const shown = TILES.filter((t) => (group === "in") === saved[t.id]);
   const current = open && TILES.find((t) => t.id === open);
@@ -94,8 +134,8 @@ export const IntegrationsPage = () => {
         {shown.length === 0 && <span className="hint">Nothing here.</span>}
         {shown.map((t) => (
           <button type="button" key={t.id} className="tile" onClick={() => setOpen(t.id)}>
-            <span className="mark" style={{ background: t.color }}>{t.letter}</span>
-            <span><b>{t.name}</b><span className="tstat">{saved[t.id] || unsaved[t.id] || results[t.id] ? status(t.id).text : "Not yet integrated"}</span></span>
+            <span className="mark" style={{ background: t.bg }}><img src={t.logo} alt="" /></span>
+            <span><b>{t.name}</b><span className="tstat">{saved[t.id] || unsaved[t.id] || results[t.id] ? tileStat(t.id) : "Not yet integrated"}</span></span>
           </button>
         ))}
       </div>
@@ -250,6 +290,23 @@ function IntegrationModal({ tile, badge, unsaved, onClose, result, onResult }: {
           </div>
           <p className="hint">Get the key in ShipStation under Settings › Account › API Settings, paste it once, then test. Tracking events in order lookup arrive in a later release.</p>
         </>
+      )}
+
+      {syncRows(id, store).length > 0 && (
+        <div className="kv sync">
+          <b className="label">Last sync</b>
+          {syncRows(id, store).map((r) => (
+            <div className="kvrow" key={r.label}>
+              <span>{r.label}</span>
+              {r.at ? (
+                <span title={new Date(r.at).toLocaleString()}>
+                  {r.error ? <Tag tone="crit">Error</Tag> : null} {new Date(r.at).toLocaleString()} <span className="hint">· {ago(r.at)}</span>
+                </span>
+              ) : <span className="hint">{r.never}</span>}
+            </div>
+          ))}
+          {syncRows(id, store).filter((r) => r.error).map((r) => <Alert key={r.label} tone="crit">{r.label}: {r.error}</Alert>)}
+        </div>
       )}
 
       {result && <Alert tone={result.ok ? "good" : "crit"}>{result.message}</Alert>}
