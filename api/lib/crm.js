@@ -419,7 +419,14 @@ export async function syncHistory(ctx, store) {
   if (!freshdeskConnected(store)) return { skipped: true };
   const crm = resolveCrm(store);
   const state = store.crmState || {};
-  let cursor = new Date(state.historyCursor || Date.now() - HISTORY_FIRST_SYNC_MS);
+  // Rolling 12-month window. historyFrom records where the stored history starts;
+  // stores first synced under the old 90-day lookback (no historyFrom, or a later
+  // one) walk back to 12 months once — tickets already stored are skipped cheaply.
+  const windowStart = new Date(Date.now() - HISTORY_FIRST_SYNC_MS);
+  const from = state.historyFrom ? new Date(state.historyFrom) : null;
+  const restart = !state.historyCursor || !from || from.getTime() > windowStart.getTime() + 24 * 3600 * 1000;
+  let cursor = restart ? windowStart : new Date(state.historyCursor);
+  const historyFrom = (restart || from < windowStart ? windowStart : from).toISOString(); // rolls forward with the window
   let examined = 0;
   let saved = 0;
   let error = "";
@@ -438,6 +445,12 @@ export async function syncHistory(ctx, store) {
         const tags = (t.tags || []).map((x) => String(x).toLowerCase());
         // Live-mode AI replies are posted as an agent; keep them out of "how agents answer".
         if ([STATUS_RESOLVED, STATUS_CLOSED].includes(t.status) && !tags.includes(crm.answeredTag)) {
+          const existing = await findHistory(api, store, t.id);
+          // Already stored as of this update (e.g. a backfill re-walking the old window).
+          if (existing?.ticketUpdatedAt && new Date(existing.ticketUpdatedAt).getTime() === new Date(t.updated_at).getTime()) {
+            cursor = new Date(t.updated_at);
+            continue;
+          }
           // Backfill yields to new-ticket handling: stop below 40% of the minute's budget.
           const budget = freshdeskBudget(store);
           if (budget && budget.remaining < budget.total * HISTORY_BUDGET_SHARE) throw new FreshdeskRateLimit(60);
@@ -445,13 +458,16 @@ export async function syncHistory(ctx, store) {
           const convos = (await freshdesk(store, "GET", `/tickets/${t.id}/conversations?per_page=100`)) || [];
           const answer = convos.filter(isAgentReply).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
           if (answer.trim()) {
-            await upsertHistory(api, store, { ticketId: t.id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at });
+            const values = { ticketId: t.id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at };
+            if (existing) await api.internal.crmHistory.update(existing.id, values);
+            else await api.internal.crmHistory.create({ storeId: store.id, ...values });
             saved++;
           }
         }
         cursor = new Date(t.updated_at);
       }
       if (tickets.length < 100) break;
+      if (page === 10) more = true; // page cap reached with tickets left
     }
   } catch (err) {
     if (err instanceof FreshdeskRateLimit) retryAfter = err.retryAfter || 60;
@@ -461,7 +477,17 @@ export async function syncHistory(ctx, store) {
     }
   }
 
+  // Caught up: drop tickets that have rolled out of the 12-month window.
+  if (!error && !retryAfter && !more) {
+    try {
+      await api.internal.crmHistory.deleteMany({ filter: { storeId: { equals: store.id }, ticketUpdatedAt: { lessThan: windowStart.toISOString() } } });
+    } catch (err) {
+      logger.warn({ err, storeId: store.id }, "crm history prune failed");
+    }
+  }
+
   await saveState(api, store, {
+    historyFrom,
     historyCursor: cursor.toISOString(),
     lastSyncAt: new Date().toISOString(),
     lastSyncError: error,
@@ -473,13 +499,13 @@ export async function syncHistory(ctx, store) {
   return { examined, saved, error, retryAfter, more };
 }
 
-async function upsertHistory(api, store, values) {
-  const [existing] = await api.internal.crmHistory.findMany({
-    filter: { storeId: { equals: store.id }, ticketId: { equals: values.ticketId } },
+async function findHistory(api, store, ticketId) {
+  const [row] = await api.internal.crmHistory.findMany({
+    filter: { storeId: { equals: store.id }, ticketId: { equals: ticketId } },
+    select: { id: true, ticketUpdatedAt: true },
     first: 1,
   });
-  if (existing) await api.internal.crmHistory.update(existing.id, values);
-  else await api.internal.crmHistory.create({ storeId: store.id, ...values });
+  return row || null;
 }
 
 async function refreshHistoryCount(api, store) {

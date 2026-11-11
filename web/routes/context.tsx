@@ -1,3 +1,4 @@
+import { useFindFirst } from "@gadgetinc/react";
 import { Fragment, useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../api";
@@ -37,7 +38,36 @@ export const ContextPage = () => {
   const [exportError, setExportError] = useState<string | null>(null);
   const [showGuardrails, setShowGuardrails] = useState(false);
   const [voiceGen, setVoiceGen] = useState<{ tone: "good" | "crit"; text: string } | null>(null);
+  const [syncMsg, setSyncMsg] = useState<{ tone: "good" | "crit"; text: string } | null>(null);
   const navigate = useNavigate();
+  // Freshdesk sync state is read on its own (like the Freshdesk tab), so the row
+  // refreshes while a background sync runs without touching unsaved edits.
+  // @ts-ignore
+  const [{ data: live }, refetchCrm] = useFindFirst(api.bigcommerce.store, { select: { id: true, crmState: true } });
+  const [pollUntil, setPollUntil] = useState(0);
+  useEffect(() => {
+    if (!pollUntil) return;
+    const t = setInterval(() => {
+      if (Date.now() > pollUntil) { setPollUntil(0); return; }
+      refetchCrm({ requestPolicy: "network-only" });
+    }, 5000);
+    return () => clearInterval(t);
+  }, [pollUntil]);
+  const crmState: any = (live as any)?.crmState || store?.crmState || {};
+
+  const resync = async () => {
+    setBusy("resync");
+    setSyncMsg(null);
+    try {
+      // @ts-ignore — global action
+      const r = await api.crmAdmin({ op: "syncNow" });
+      setSyncMsg({ tone: r.ok ? "good" : "crit", text: r.message || (r.ok ? "History sync started." : "Sync failed.") });
+      if (r.ok) setPollUntil(Date.now() + 3 * 60 * 1000);
+    } catch (e: any) {
+      setSyncMsg({ tone: "crit", text: e?.message || "Sync failed." });
+    }
+    setBusy(null);
+  };
 
   const loadCatalogCount = async () => {
     setCatalog((c) => ({ ...c, loading: true, error: undefined }));
@@ -133,8 +163,9 @@ export const ContextPage = () => {
     if (s.id === "catalog") return catalog.error ? <Tag tone="crit">Error</Tag> : <Tag tone="good">Live</Tag>;
     if (s.id === "freshdesk") {
       if (!freshdeskConnected(store)) return <Tag>Not connected</Tag>;
-      if (store?.crmState?.lastSyncError) return <Tag tone="crit">Sync error</Tag>;
-      return store?.crmState?.lastSyncAt ? <Tag tone="good">Synced</Tag> : <Tag tone="warn">Waiting for first sync</Tag>;
+      if (crmState.lastSyncError) return <Tag tone="crit">Sync error</Tag>;
+      if (crmState.syncPausedUntil && new Date(crmState.syncPausedUntil) > new Date()) return <Tag tone="warn">Syncing</Tag>;
+      return crmState.lastSyncAt ? <Tag tone="good">Synced</Tag> : <Tag tone="warn">Waiting for first sync</Tag>;
     }
     if (s.id === "playbook") {
       return store?.salesPlaybook?.trim() ? <Tag tone="good">{`Active · v${store?.learningState?.activeVersion ?? "?"}`}</Tag> : <Tag>No version live</Tag>;
@@ -149,8 +180,9 @@ export const ContextPage = () => {
     if (s.field && store?.updatedAt) parts.push(`saved ${new Date(store.updatedAt).toLocaleDateString()}`);
     const seed = store?.crmState?.voiceSeed;
     if (s.id === "voice" && seed?.at && store?.voiceTone?.trim()) parts.push(`seeded from ${(seed.replies ?? 0).toLocaleString()} agent replies on ${new Date(seed.at).toLocaleDateString()}`);
-    if (s.id === "freshdesk" && store?.crmState?.lastSyncAt) {
-      parts.push(`${(store.crmState.historyCount ?? 0).toLocaleString()} tickets`, `synced ${new Date(store.crmState.lastSyncAt).toLocaleDateString()}`);
+    if (s.id === "freshdesk" && crmState.lastSyncAt) {
+      parts.push(`${(crmState.historyCount ?? 0).toLocaleString()} tickets`, `last sync ${new Date(crmState.lastSyncAt).toLocaleString()}`);
+      if (crmState.historyFrom) parts.push(`since ${new Date(crmState.historyFrom).toLocaleDateString()}`);
     }
     if (s.id === "catalog") {
       if (catalog.loading) parts.push("counting…");
@@ -189,7 +221,15 @@ export const ContextPage = () => {
         </>
       );
     }
-    if (s.id === "freshdesk") return freshdeskConnected(store) ? exportBtns(s) : <span className="hint">Connect Freshdesk under Integrations</span>;
+    if (s.id === "freshdesk") {
+      if (!freshdeskConnected(store)) return <span className="hint">Connect Freshdesk under Integrations</span>;
+      return (
+        <>
+          <Btn small loading={busy === "resync"} onClick={resync} title="Pull resolved/closed tickets from the last 12 months now">{crmState.lastSyncAt ? "Re-sync now" : "Sync now"}</Btn>
+          {exportBtns(s)}
+        </>
+      );
+    }
     if (s.id === "playbook") {
       return (
         <>
@@ -218,6 +258,7 @@ export const ContextPage = () => {
               {actions(s)}
             </div>
             {s.id === "voice" && voiceGen && <Alert tone={voiceGen.tone}>{voiceGen.text}</Alert>}
+            {s.id === "freshdesk" && syncMsg && <Alert tone={syncMsg.tone}>{syncMsg.text}</Alert>}
             {s.field && editing === s.field && (
               <div className="editor">
                 <textarea
