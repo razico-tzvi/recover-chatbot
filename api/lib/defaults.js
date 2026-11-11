@@ -195,6 +195,8 @@ export const DEFAULT_CRM = {
   draftTag: "ai-draft",
   answeredTag: "ai-answered",
   blockedTag: "ai-blocked",
+  skippedTag: "ai-skipped", // the bot couldn't answer (low-confidence draft) — needs an agent
+  humanTag: "human-requested", // the customer asked for a person — never auto-answered, left open for CS
   signature: "",
   blocklist: [], // [{ topic, keywords: string[], response }] — empty response = leave for a human (see DEFAULT_BLOCKLIST)
 };
@@ -242,6 +244,8 @@ export function resolveCrm(store) {
     draftTag: tagName(s.draftTag, DEFAULT_CRM.draftTag),
     answeredTag: tagName(s.answeredTag, DEFAULT_CRM.answeredTag),
     blockedTag: tagName(s.blockedTag, DEFAULT_CRM.blockedTag),
+    skippedTag: tagName(s.skippedTag, DEFAULT_CRM.skippedTag),
+    humanTag: tagName(s.humanTag, DEFAULT_CRM.humanTag),
     signature: typeof s.signature === "string" ? s.signature.slice(0, 1000) : "",
     // A store gets the defaults until it saves its own list (blocklistSeeded);
     // after that the saved list is used as-is, even if empty. Lists saved before
@@ -256,6 +260,21 @@ export function resolveCrm(store) {
       .filter((b) => b.topic && b.keywords.length)
       .slice(0, 50),
   };
+}
+
+// True when a ticket explicitly asks for a person ("can I speak to a human",
+// "real person please", "transfer me to an agent"). The drafting model also
+// reports this; either one routes the ticket to CS.
+const HUMAN_WORD = "(?:human|person|people|agent|representative|rep|someone|somebody|employee|staff|manager|supervisor|operator)";
+const HUMAN_PATTERNS = [
+  new RegExp(`\\b(?:speak|talk|chat|connect|transfer|escalate|put)\\s+(?:me\\s+)?(?:to|with|through to)\\s+(?:a|an|the|some|your|one of your)?\\s*(?:real|live|actual)?\\s*${HUMAN_WORD}\\b`),
+  new RegExp(`\\b(?:real|live|actual)\\s+(?:human|person|people|agent|representative)\\b`),
+  new RegExp(`\\b(?:want|need|prefer|like)\\s+(?:to\\s+(?:speak|talk)\\s+to\\s+)?(?:a|an)\\s+(?:human|person)\\b`),
+  /\b(?:not|no)\s+(?:a\s+)?(?:bot|robot|ai|automated (?:reply|response|message))\b/,
+];
+export function detectHumanRequest(text) {
+  const t = String(text || "").toLowerCase().replace(/\s+/g, " ");
+  return HUMAN_PATTERNS.some((re) => re.test(t));
 }
 
 // First blocklist topic whose keyword appears in the text (whole-word, case-insensitive).

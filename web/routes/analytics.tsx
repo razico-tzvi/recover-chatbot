@@ -62,6 +62,7 @@ const TICKET_LABELS: Record<string, string> = {
   drafted: "Drafted (private note)",
   replied: "Answered (public reply)",
   blocked: "Blocked topic",
+  human: "Asked for a person",
   skipped: "Skipped",
   error: "Errors",
 };

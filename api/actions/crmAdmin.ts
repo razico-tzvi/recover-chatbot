@@ -1,5 +1,5 @@
 import { ActionOptions } from "gadget-server";
-import { resolveCrm } from "../lib/defaults";
+import { resolveCrm, detectHumanRequest } from "../lib/defaults";
 import { freshdesk, freshdeskConnected } from "../lib/integrations";
 import { llmConfig } from "../lib/llm";
 import { draftReply, processTicket, withSignature } from "../lib/crm";
@@ -41,8 +41,13 @@ export const run: ActionRun = async ({ params, api, connections, logger }) => {
       if (!cfg.configured) return { ok: false, message: "Connect Anthropic (API key and model) on the Integrations tab first." };
       const question = String(params.text || "").trim().slice(0, 4000);
       if (!question) return { ok: false, message: "Paste a customer message to preview." };
-      const d = await draftReply(ctx, store, cfg, { subject: String(params.subject || "").slice(0, 300), question, name: "" });
-      return { ok: true, confident: d.confident, reason: d.reason, reply: withSignature(d.reply, resolveCrm(store).signature), model: cfg.model };
+      const subject = String(params.subject || "").slice(0, 300);
+      const d = await draftReply(ctx, store, cfg, { subject, question, name: "" });
+      const crm = resolveCrm(store);
+      const humanRequested = detectHumanRequest(`${subject}\n${question}`) || d.humanRequested;
+      // The tags the ticket flow would add (processTicket), so Try it shows them.
+      const tags = humanRequested ? [crm.humanTag] : d.confident ? [crm.draftTag] : [crm.draftTag, crm.skippedTag];
+      return { ok: true, confident: d.confident, humanRequested, tags, reason: d.reason, reply: withSignature(d.reply, crm.signature), model: cfg.model };
     }
 
     case "retry": {

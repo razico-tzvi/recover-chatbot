@@ -6,7 +6,7 @@ import { freshdeskConnected, freshdeskTicketUrl } from "../../api/lib/integratio
 import { useSettings, type CrmDraft, type Draft } from "../lib/settings";
 import { Alert, Btn, Card, Field, Loading, Seg, Tag, type Tone } from "../components/ui";
 
-type OpResult = { ok: boolean; message?: string; confident?: boolean; reason?: string; reply?: string; model?: string };
+type OpResult = { ok: boolean; message?: string; confident?: boolean; humanRequested?: boolean; tags?: string[]; reason?: string; reply?: string; model?: string };
 
 async function crmOp(args: Record<string, unknown>): Promise<OpResult> {
   try {
@@ -101,7 +101,7 @@ function ModeCard() {
         <p className="hint">
           {c.mode === "off" && "The bot doesn't touch tickets. History sync still runs nightly so drafts are ready when you switch on."}
           {c.mode === "learning" && <>Each new ticket gets an AI draft as a <b>private note</b> tagged <span className="mono">{c.draftTag}</span>. Nothing reaches the customer. When an agent sends their own reply, it's compared with the draft and the edits are used as feedback for later drafts.</>}
-          {c.mode === "live" && <>Confident answers are <b>sent to the customer</b> as a public reply and tagged <span className="mono">{c.answeredTag}</span>. Anything the AI isn't sure about still lands as a private draft for an agent. Start in Learning mode until the drafts need few edits.</>}
+          {c.mode === "live" && <>Confident answers are <b>sent to the customer</b> as a public reply and tagged <span className="mono">{c.answeredTag}</span>. Anything the AI isn't sure about still lands as a private draft for an agent, tagged <span className="mono">{c.skippedTag}</span>; a customer who asks for a person is never answered — tagged <span className="mono">{c.humanTag}</span> and left open. Start in Learning mode until the drafts need few edits.</>}
         </p>
       </div>
       {c.mode !== savedMode && <Alert tone="warn">Mode change isn't saved yet — click Save settings.</Alert>}
@@ -158,6 +158,12 @@ function TicketRulesCard() {
         <Field label="Blocked-topic tag" htmlFor="crm-bt" hint="Added when a ticket hits the topic blocklist.">
           <input type="text" id="crm-bt" value={c.blockedTag} onChange={(e) => setC({ blockedTag: e.target.value })} />
         </Field>
+        <Field label="Skipped tag" htmlFor="crm-st" hint="Added (with the draft tag) when the bot can't answer confidently — the draft needs an agent.">
+          <input type="text" id="crm-st" value={c.skippedTag} onChange={(e) => setC({ skippedTag: e.target.value })} />
+        </Field>
+        <Field label="Human-requested tag" htmlFor="crm-ht" hint="Added when the customer asks for a person. Never answered by the bot, even in Live mode; the ticket stays open for customer service.">
+          <input type="text" id="crm-ht" value={c.humanTag} onChange={(e) => setC({ humanTag: e.target.value })} />
+        </Field>
         <Field label="Bot signature" htmlFor="crm-sig" full hint="Appended to every draft and reply. The AI never writes its own sign-off.">
           <textarea id="crm-sig" rows={3} value={c.signature} placeholder={"Best,\nThe Support Team"} onChange={(e) => setC({ signature: e.target.value })} />
         </Field>
@@ -205,6 +211,7 @@ const ACTIONS: Record<string, { label: string; tone: Tone }> = {
   drafted: { label: "Drafted", tone: "info" },
   replied: { label: "Replied", tone: "good" },
   blocked: { label: "Blocked topic", tone: "warn" },
+  human: { label: "Human requested", tone: "warn" },
   skipped: { label: "Skipped", tone: "muted" },
   error: { label: "Error", tone: "crit" },
 };
@@ -239,7 +246,7 @@ function ActivityCard() {
       title="Recent tickets"
       sub={
         rows.length
-          ? `Last ${rows.length}: ${count("drafted")} drafted · ${count("replied")} replied · ${count("blocked")} blocked · ${count("error")} errors` +
+          ? `Last ${rows.length}: ${count("drafted")} drafted · ${count("replied")} replied · ${count("blocked")} blocked · ${count("human")} asked for a person · ${count("error")} errors` +
             (avg != null ? ` · agents kept ${Math.round(avg * 100)}% of draft wording on average (${reviewed.length} reviewed)` : "")
           : "Tickets the bot handles show up here."
       }
@@ -264,7 +271,7 @@ function ActivityCard() {
                     <td className="ellipsis">{r.subject || "(no subject)"}</td>
                     <td>
                       <Tag tone={a.tone}>{a.label}</Tag>{" "}
-                      {r.action === "drafted" && r.confident === false && <Tag tone="warn">Needs agent</Tag>}
+                      {r.action === "drafted" && r.confident === false && <Tag tone="warn">Needs agent (skipped)</Tag>}
                     </td>
                     <td className="num">{typeof r.similarity === "number" ? `${Math.round(r.similarity * 100)}%` : "—"}</td>
                   </tr>,
@@ -317,7 +324,12 @@ function PreviewCard() {
       {res?.ok && (
         <div style={{ marginTop: 12 }}>
           <div className="row">
-            <Tag tone={res.confident ? "good" : "warn"}>{res.confident ? "Confident — Live mode would send this" : "Not confident — would stay a private draft"}</Tag>
+            <Tag tone={res.humanRequested || !res.confident ? "warn" : "good"}>
+              {res.humanRequested
+                ? "Customer asked for a person — never sent; left open for customer service"
+                : res.confident ? "Confident — Live mode would send this" : "Not confident — would stay a private draft"}
+            </Tag>
+            {Array.isArray(res.tags) && res.tags.length > 0 && <span className="hint">Tags: <span className="mono">{res.tags.join(", ")}</span></span>}
             {res.model && <span className="hint mono">{res.model}</span>}
           </div>
           {res.reason && <p className="hint">{res.reason}</p>}

@@ -14,6 +14,8 @@ export type CrmDraft = {
   draftTag: string;
   answeredTag: string;
   blockedTag: string;
+  skippedTag: string;
+  humanTag: string;
   signature: string;
   blocklist: { topic: string; keywords: string; response: string }[];
 };
@@ -27,6 +29,8 @@ function crmDraftFrom(store: any): CrmDraft {
     draftTag: c.draftTag,
     answeredTag: c.answeredTag,
     blockedTag: c.blockedTag,
+    skippedTag: c.skippedTag,
+    humanTag: c.humanTag,
     signature: c.signature,
     blocklist: c.blocklist.map((b: any) => ({ topic: b.topic, keywords: b.keywords.join(", "), response: b.response })),
   };

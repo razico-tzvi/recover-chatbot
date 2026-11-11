@@ -1,8 +1,10 @@
 // CRM ticket answering (Freshdesk). Server-only.
 //
 // pollStore     — every 5 min: new open tickets created after the mode was turned
-//                 on → blocklist check → AI draft → private note (Learning) or
-//                 public reply (Live; low-confidence answers still go out as notes).
+//                 on → human-request / blocklist check → AI draft → private note
+//                 (Learning) or public reply (Live; low-confidence answers still go
+//                 out as notes tagged ai-skipped; a request for a person is never
+//                 answered, tagged human-requested and left open for CS).
 // collectFeedback — for drafts, the reply an agent actually sent is stored with
 //                 a similarity score; edited drafts are shown to later drafts.
 // syncHistory   — nightly: resolved/closed tickets → agent public replies only,
@@ -10,7 +12,7 @@
 
 import {
   CRM_GUARDRAILS, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
-  resolveBranding, resolveCrm, matchBlocklist,
+  resolveBranding, resolveCrm, matchBlocklist, detectHumanRequest,
 } from "./defaults";
 import { freshdesk, freshdeskBudget, freshdeskConnected, FreshdeskRateLimit } from "./integrations";
 import { llmConfig, complete } from "./llm";
@@ -116,7 +118,7 @@ function isCandidate(t, crm, since) {
   if (new Date(t.created_at) < since) return false;
   const tags = (t.tags || []).map((x) => String(x).toLowerCase());
   if (tags.some((x) => crm.skipTags.includes(x))) return false;
-  if ([crm.draftTag, crm.answeredTag, crm.blockedTag].some((x) => tags.includes(x))) return false;
+  if ([crm.draftTag, crm.answeredTag, crm.blockedTag, crm.skippedTag, crm.humanTag].some((x) => tags.includes(x))) return false;
   if (crm.onlyTags.length && !tags.some((x) => crm.onlyTags.includes(x))) return false;
   return true;
 }
@@ -134,7 +136,13 @@ export async function processTicket(ctx, store, crm, cfg, t) {
     const convos = (await freshdesk(store, "GET", `/tickets/${t.id}/conversations?per_page=100`)) || [];
     if (convos.some(isAgentReply)) return record({ action: "skipped", reason: "An agent already replied." });
 
+    const askedForHuman = detectHumanRequest(`${subject}\n${question}`);
     const blocked = matchBlocklist(`${subject}\n${question}`, crm.blocklist);
+    if (blocked && askedForHuman) {
+      // No AI text on a blocked topic, and no set response either: they asked for a person.
+      await addTag(ctx, store, t, crm.blockedTag, crm.humanTag);
+      return record({ action: "human", blockedTopic: blocked.topic, reason: "The customer asked for a person (blocked topic) — left open for customer service." });
+    }
     if (blocked) {
       if (!blocked.response) {
         await addTag(ctx, store, t, crm.blockedTag);
@@ -150,6 +158,13 @@ export async function processTicket(ctx, store, crm, cfg, t) {
 
     const d = await draftReply(ctx, store, cfg, { subject, question, name: requesterName(t.requester) });
     const text = withSignature(d.reply, crm.signature);
+    if (askedForHuman || d.humanRequested) {
+      // Never sent, in either mode; the draft is only a head start for the agent.
+      await addNote(store, t.id, "The customer asked for a person — left open for customer service. AI draft for reference only; not sent to the customer.", text);
+      const row = await record({ action: "human", draft: d.reply, confident: false, reason: "The customer asked for a person — left open for customer service.", model: cfg.model, nextCheckAt: nextCheck(10 * 60 * 1000) });
+      await addTag(ctx, store, t, crm.humanTag);
+      return row;
+    }
     if (crm.mode === "live" && d.confident) {
       await freshdesk(store, "POST", `/tickets/${t.id}/reply`, { body: toHtml(text) });
       const row = await record({ action: "replied", draft: d.reply, confident: true, reason: d.reason, model: cfg.model });
@@ -161,7 +176,8 @@ export async function processTicket(ctx, store, crm, cfg, t) {
       : `AI draft, needs an agent: ${d.reason || "the AI wasn't confident"}. Not sent to the customer.`;
     await addNote(store, t.id, header, text);
     const row = await record({ action: "drafted", draft: d.reply, confident: d.confident, reason: d.reason, model: cfg.model, nextCheckAt: nextCheck(10 * 60 * 1000) });
-    await addTag(ctx, store, t, crm.draftTag);
+    // Not confident = the bot couldn't answer it: also tag it for an agent.
+    await addTag(ctx, store, t, ...(d.confident ? [crm.draftTag] : [crm.draftTag, crm.skippedTag]));
     return row;
   } catch (err) {
     if (err instanceof FreshdeskRateLimit) throw err;
@@ -189,14 +205,15 @@ async function addNote(store, ticketId, header, text) {
 }
 
 // Tags are best effort: a store with required custom ticket fields can reject the update.
-async function addTag(ctx, store, t, tag) {
+// Several tags go in one PUT (it replaces the ticket's tag list).
+async function addTag(ctx, store, t, ...add) {
   try {
-    const tags = [...new Set([...(t.tags || []), tag])];
+    const tags = [...new Set([...(t.tags || []), ...add.filter(Boolean)])];
     await freshdesk(store, "PUT", `/tickets/${t.id}`, { tags });
     t.tags = tags;
   } catch (err) {
     // Never rethrow: the note/reply is already posted, and a retry would post it twice.
-    ctx.logger.warn({ err, ticketId: t.id, tag }, "crm tag update failed");
+    ctx.logger.warn({ err, ticketId: t.id, tags: add }, "crm tag update failed");
   }
 }
 
@@ -225,7 +242,8 @@ export async function draftReply(ctx, store, cfg, { subject, question, name }) {
   }
   parts.push(
     `Respond with ONLY a JSON object, no other text:
-{"confident": true or false, "reason": "one short sentence: why you are or aren't confident", "reply": "the email body"}
+{"confident": true or false, "human_requested": true or false, "reason": "one short sentence: why you are or aren't confident", "reply": "the email body"}
+Set "human_requested" to true only when the customer explicitly asks to deal with a person (a human, a real agent, a manager, "not a bot") rather than an automated reply; then the ticket goes to customer service and your reply is only a draft for them.
 The reply is plain text (no markdown), starts with a greeting${name ? " using the customer's first name" : ""}, answers every question in the ticket, and has NO sign-off or signature — one is added automatically.`
   );
 
@@ -250,7 +268,7 @@ export function parseDraft(raw) {
     try {
       const o = JSON.parse(s.slice(i, j + 1));
       if (o && typeof o.reply === "string" && o.reply.trim()) {
-        return { confident: o.confident === true, reason: clip(o.reason, 300), reply: o.reply.trim() };
+        return { confident: o.confident === true, humanRequested: o.human_requested === true, reason: clip(o.reason, 300), reply: o.reply.trim() };
       }
     } catch { /* try the salvage below */ }
   }
@@ -258,10 +276,10 @@ export function parseDraft(raw) {
   if (m) {
     try {
       const reply = JSON.parse(`"${m[1]}"`).trim();
-      if (reply) return { confident: false, reason: "The AI's answer was slightly malformed; review carefully.", reply };
+      if (reply) return { confident: false, humanRequested: /"human_requested"\s*:\s*true/.test(s), reason: "The AI's answer was slightly malformed; review carefully.", reply };
     } catch { /* fall through */ }
   }
-  if (i < 0) return { confident: false, reason: "The AI answered in plain text instead of the expected format.", reply: s };
+  if (i < 0) return { confident: false, humanRequested: false, reason: "The AI answered in plain text instead of the expected format.", reply: s };
   throw new Error("The AI's draft wasn't in the expected format; nothing was posted.");
 }
 
