@@ -12,7 +12,7 @@
 
 import {
   CRM_GUARDRAILS, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
-  resolveBranding, resolveCrm, matchBlocklist, detectHumanRequest,
+  resolveBranding, resolveCrm, resolveSignature, matchBlocklist, detectHumanRequest,
 } from "./defaults";
 import { freshdesk, freshdeskBudget, freshdeskConnected, FreshdeskRateLimit } from "./integrations";
 import { llmConfig, complete } from "./llm";
@@ -148,7 +148,7 @@ export async function processTicket(ctx, store, crm, cfg, t) {
         await addTag(ctx, store, t, crm.blockedTag);
         return record({ action: "blocked", blockedTopic: blocked.topic, reason: "Blocked topic with no set response — left for a human." });
       }
-      const text = withSignature(blocked.response, crm.signature);
+      const text = withSignature(blocked.response, resolveSignature(store));
       if (crm.mode === "live") await freshdesk(store, "POST", `/tickets/${t.id}/reply`, { body: toHtml(text) });
       else await addNote(store, t.id, `Set response for blocked topic “${blocked.topic}”. Not sent to the customer.`, text);
       const row = await record({ action: "blocked", blockedTopic: blocked.topic, draft: blocked.response, confident: true, reason: crm.mode === "live" ? "Set response sent." : "Set response added as a private note.", nextCheckAt: crm.mode === "live" ? null : nextCheck(10 * 60 * 1000) });
@@ -157,7 +157,7 @@ export async function processTicket(ctx, store, crm, cfg, t) {
     }
 
     const d = await draftReply(ctx, store, cfg, { subject, question, name: requesterName(t.requester) });
-    const text = withSignature(d.reply, crm.signature);
+    const text = withSignature(d.reply, resolveSignature(store));
     if (askedForHuman || d.humanRequested) {
       // Never sent, in either mode; the draft is only a head start for the agent.
       await addNote(store, t.id, "The customer asked for a person — left open for customer service. AI draft for reference only; not sent to the customer.", text);

@@ -1,5 +1,5 @@
 import { ActionOptions } from "gadget-server";
-import { resolveCrm, detectHumanRequest } from "../lib/defaults";
+import { resolveCrm, resolveSignature, detectHumanRequest } from "../lib/defaults";
 import { freshdesk, freshdeskConnected } from "../lib/integrations";
 import { llmConfig } from "../lib/llm";
 import { draftReply, processTicket, withSignature } from "../lib/crm";
@@ -47,7 +47,7 @@ export const run: ActionRun = async ({ params, api, connections, logger }) => {
       const humanRequested = detectHumanRequest(`${subject}\n${question}`) || d.humanRequested;
       // The tags the ticket flow would add (processTicket), so Try it shows them.
       const tags = humanRequested ? [crm.humanTag] : d.confident ? [crm.draftTag] : [crm.draftTag, crm.skippedTag];
-      return { ok: true, confident: d.confident, humanRequested, tags, reason: d.reason, reply: withSignature(d.reply, crm.signature), model: cfg.model };
+      return { ok: true, confident: d.confident, humanRequested, tags, reason: d.reason, reply: withSignature(d.reply, resolveSignature(store)), model: cfg.model };
     }
 
     case "retry": {

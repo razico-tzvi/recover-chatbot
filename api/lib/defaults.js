@@ -187,6 +187,8 @@ export const CRM_GUARDRAILS = `Rules for answering support tickets (always apply
 
 // mode: "off" | "learning" (drafts as private notes) | "live" (public replies;
 // low-confidence answers still go out as private drafts).
+export const DEFAULT_SIGNATURE = "If you need a human response, just let us know.\n\n{botName}";
+
 export const DEFAULT_CRM = {
   mode: "off",
   enabledAt: "", // ISO time mode last left "off" — tickets created before it are never touched
@@ -197,7 +199,8 @@ export const DEFAULT_CRM = {
   blockedTag: "ai-blocked",
   skippedTag: "ai-skipped", // the bot couldn't answer (low-confidence draft) — needs an agent
   humanTag: "human-requested", // the customer asked for a person — never auto-answered, left open for CS
-  signature: "",
+  // {botName} is replaced with the store's bot name (General tab) when the reply is signed.
+  signature: DEFAULT_SIGNATURE,
   blocklist: [], // [{ topic, keywords: string[], response }] — empty response = leave for a human (see DEFAULT_BLOCKLIST)
 };
 
@@ -230,6 +233,11 @@ export const DEFAULT_BLOCKLIST = [
   },
 ];
 
+// The signature text appended to Freshdesk replies, with {botName} filled in.
+export function resolveSignature(store) {
+  return resolveCrm(store).signature.replace(/\{botName\}/g, resolveBranding(store).botName).trim();
+}
+
 const tagList = (v, fallback) =>
   Array.isArray(v) ? [...new Set(v.map((t) => String(t || "").trim().toLowerCase()).filter(Boolean))].slice(0, 20) : fallback;
 const tagName = (v, fallback) => String(v || "").trim().toLowerCase().slice(0, 40) || fallback;
@@ -246,7 +254,14 @@ export function resolveCrm(store) {
     blockedTag: tagName(s.blockedTag, DEFAULT_CRM.blockedTag),
     skippedTag: tagName(s.skippedTag, DEFAULT_CRM.skippedTag),
     humanTag: tagName(s.humanTag, DEFAULT_CRM.humanTag),
-    signature: typeof s.signature === "string" ? s.signature.slice(0, 1000) : "",
+    // Like the blocklist: the default until the store saves its own signature
+    // (signatureSeeded); an empty signature saved before the default existed
+    // gets the default. After that the saved text is used as-is, even if empty.
+    signatureSeeded: true,
+    signature:
+      typeof s.signature === "string" && (s.signatureSeeded === true || s.signature.trim())
+        ? s.signature.slice(0, 1000)
+        : DEFAULT_CRM.signature,
     // A store gets the defaults until it saves its own list (blocklistSeeded);
     // after that the saved list is used as-is, even if empty. Lists saved before
     // the defaults existed are kept when non-empty.

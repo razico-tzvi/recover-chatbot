@@ -164,7 +164,7 @@ function TicketRulesCard() {
         <Field label="Human-requested tag" htmlFor="crm-ht" hint="Added when the customer asks for a person. Never answered by the bot, even in Live mode; the ticket stays open for customer service.">
           <input type="text" id="crm-ht" value={c.humanTag} onChange={(e) => setC({ humanTag: e.target.value })} />
         </Field>
-        <Field label="Bot signature" htmlFor="crm-sig" full hint="Appended to every draft and reply. The AI never writes its own sign-off.">
+        <Field label="Bot signature" htmlFor="crm-sig" full hint="Appended to every draft and reply; {botName} becomes the bot display name from the General tab. The AI never writes its own sign-off.">
           <textarea id="crm-sig" rows={3} value={c.signature} placeholder={"Best,\nThe Support Team"} onChange={(e) => setC({ signature: e.target.value })} />
         </Field>
       </div>
