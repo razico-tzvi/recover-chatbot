@@ -11,10 +11,10 @@ import { seedVoiceTone, VOICE_SEED_REPLIES } from "../lib/voice";
 // its Voice & tone is seeded once from the stored agent replies — only while the
 // block is still the built-in default.
 // Then (once the list is caught up) it backfills archived tickets by id — Freshdesk
-// drops them from the list — which can take hours on a 40/min plan, so archive
-// runs may chain up to MAX_ARCHIVE_CONTINUATIONS.
-const MAX_CONTINUATIONS = 20;
-const MAX_ARCHIVE_CONTINUATIONS = 1500;
+// drops them from the list. A 12-month backfill on a 40/min plan pauses for the
+// rate limit hundreds of times, so a chain may continue up to MAX_CONTINUATIONS;
+// it ends on its own as soon as a run is caught up.
+const MAX_CONTINUATIONS = 1500;
 
 export const run: ActionRun = async ({ params, api, logger }) => {
   const ctx = { api, logger };
@@ -33,7 +33,7 @@ export const run: ActionRun = async ({ params, api, logger }) => {
         r = { ...(await syncArchived(ctx, store)), live: r };
       }
       results[store.id] = r;
-      if ((r.retryAfter || r.more) && continuation < (r.archive ? MAX_ARCHIVE_CONTINUATIONS : MAX_CONTINUATIONS)) {
+      if ((r.retryAfter || r.more) && continuation < MAX_CONTINUATIONS) {
         const delayS = r.retryAfter ? r.retryAfter + 5 : 5;
         await api.enqueue(
           api.crmSyncHistory,
