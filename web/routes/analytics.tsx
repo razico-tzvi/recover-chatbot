@@ -56,6 +56,7 @@ const SAFETY_LABELS: Record<string, string> = {
   verify_fail: "Failed order verifications",
   lockout: "Order-lookup lockouts",
   flag: "Flagged conversations",
+  blocked_topic: "Blocked-topic chat messages",
 };
 const TICKET_LABELS: Record<string, string> = {
   drafted: "Drafted (private note)",

@@ -2,6 +2,7 @@ import { RouteHandler } from "gadget-server";
 import {
   GUARDRAILS, DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
   resolveBranding, resolveFeatures, resolveSafeguards, enabledTools, tokenCost, PRODUCT_TOOLS,
+  resolveCrm, matchBlocklist,
 } from "../lib/defaults";
 import { freshdeskConnected, createFreshdeskTicket } from "../lib/integrations";
 
@@ -63,10 +64,34 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
   // Image uploads are a feature toggle; drop images server-side when it's off.
   if (!resolveFeatures(store).vision) messages = messages.map(({ images, ...m }) => m);
 
+  // Topic blocklist (Freshdesk tab; shared with ticket answering). A message on a
+  // blocked topic never gets an AI-written answer: the set response is sent word
+  // for word, or with no set response the topic is left for customer service.
+  const lastUser = messages[messages.length - 1] || {};
+  const playbookVersion = store.salesPlaybook?.trim() ? Number(store.learningState?.activeVersion) || 0 : 0;
+  const blocked = matchBlocklist(String(lastUser.content || ""), resolveCrm(store).blocklist);
+  if (blocked) await logSafety(api, { storeId: store.id, sessionId, ip, kind: "blocked_topic", detail: blocked.topic });
+  if (blocked?.response) {
+    sendText(request, reply, blocked.response);
+    try {
+      await persistTurn(api, {
+        storeId: store.id, sessionId, userText: String(lastUser.content || ""), userImages: lastUser.images,
+        assistantText: blocked.response, provider, model, ip, toolsUsed: [],
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, storefrontCartId, playbookVersion,
+      });
+    } catch (err) {
+      logger.error({ err }, "persist turn failed");
+    }
+    return;
+  }
+
   const bc = await connections.bigcommerce.forStoreHash(storeHash);
 
   // Built-in guardrails + the store's context blocks + the page the shopper is on.
-  const system = buildSystem(store, body.page);
+  let system = buildSystem(store, body.page);
+  if (blocked) {
+    system += `\n\n--- BLOCKED TOPIC (applies to the shopper's latest message only) ---\nThe latest message is about "${blocked.topic}", which this store's customer service team handles personally. Do NOT answer it, give advice, or state facts or policies about it, and don't speculate about what the store sells. Say briefly that the customer service team handles this directly and offer a human handoff (ask for their email if you don't have it).`;
+  }
   const allowed = enabledTools(store);
   const tools = TOOLS.filter((t) => allowed.has(t.function.name));
 
@@ -93,11 +118,9 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
 
   // Persist the turn for the admin conversation view (best-effort; never blocks the reply).
   try {
-    const lastUser = messages[messages.length - 1] || {};
     await persistTurn(api, {
       storeId: store.id, sessionId, userText: String(lastUser.content || ""),
-      userImages: lastUser.images, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId,
-      playbookVersion: store.salesPlaybook?.trim() ? Number(store.learningState?.activeVersion) || 0 : 0,
+      userImages: lastUser.images, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId, playbookVersion,
     });
   } catch (err) {
     logger.error({ err }, "persist turn failed");

@@ -196,8 +196,37 @@ export const DEFAULT_CRM = {
   answeredTag: "ai-answered",
   blockedTag: "ai-blocked",
   signature: "",
-  blocklist: [], // [{ topic, keywords: string[], response }] — empty response = leave for a human
+  blocklist: [], // [{ topic, keywords: string[], response }] — empty response = leave for a human (see DEFAULT_BLOCKLIST)
 };
+
+// Seeded topic blocklist (a store that never saved its blocklist gets these).
+// Applies to Freshdesk tickets and to site chat: a matching message never gets
+// an AI-written answer — the set response is used word for word, or with no
+// set response the topic is left for customer service.
+export const LEGAL_SET_RESPONSE =
+  "My settings restrict me from providing any type of legal advice. Please consult with a lawyer familiar with the laws in your state.";
+export const DEFAULT_BLOCKLIST = [
+  {
+    topic: "Chargebacks and payment disputes",
+    keywords: ["chargeback", "chargebacks", "charge back", "charged back", "payment dispute", "dispute the charge", "disputed charge", "dispute a charge", "disputing the charge", "bank dispute", "paypal dispute", "credit card dispute"],
+    response: "",
+  },
+  {
+    topic: "Dealer and wholesale inquiries",
+    keywords: ["wholesale", "wholesaler", "dealer", "dealers", "dealer pricing", "dealer account", "distributor", "distributors", "reseller", "resellers", "resell", "become a dealer", "bulk pricing"],
+    response: "",
+  },
+  {
+    topic: "Warranty claims (RMA decision)",
+    keywords: ["warranty claim", "warranty claims", "rma", "return authorization", "return merchandise authorization", "warranty replacement", "warranty repair", "under warranty", "covered by warranty", "covered under warranty"],
+    response: "",
+  },
+  {
+    topic: "Legal questions",
+    keywords: ["legal", "illegal", "legally", "legality", "lawful", "unlawful", "lawyer", "attorney", "laws", "the law", "against the law", "law in", "allowed by law"],
+    response: LEGAL_SET_RESPONSE,
+  },
+];
 
 const tagList = (v, fallback) =>
   Array.isArray(v) ? [...new Set(v.map((t) => String(t || "").trim().toLowerCase()).filter(Boolean))].slice(0, 20) : fallback;
@@ -214,16 +243,18 @@ export function resolveCrm(store) {
     answeredTag: tagName(s.answeredTag, DEFAULT_CRM.answeredTag),
     blockedTag: tagName(s.blockedTag, DEFAULT_CRM.blockedTag),
     signature: typeof s.signature === "string" ? s.signature.slice(0, 1000) : "",
-    blocklist: Array.isArray(s.blocklist)
-      ? s.blocklist
-          .map((b) => ({
-            topic: String(b?.topic || "").trim().slice(0, 80),
-            keywords: tagList(Array.isArray(b?.keywords) ? b.keywords : String(b?.keywords || "").split(","), []),
-            response: String(b?.response || "").trim().slice(0, 4000),
-          }))
-          .filter((b) => b.topic && b.keywords.length)
-          .slice(0, 50)
-      : [],
+    // A store gets the defaults until it saves its own list (blocklistSeeded);
+    // after that the saved list is used as-is, even if empty. Lists saved before
+    // the defaults existed are kept when non-empty.
+    blocklistSeeded: true,
+    blocklist: (Array.isArray(s.blocklist) && (s.blocklistSeeded === true || s.blocklist.length) ? s.blocklist : DEFAULT_BLOCKLIST)
+      .map((b) => ({
+        topic: String(b?.topic || "").trim().slice(0, 80),
+        keywords: tagList(Array.isArray(b?.keywords) ? b.keywords : String(b?.keywords || "").split(","), []),
+        response: String(b?.response || "").trim().slice(0, 4000),
+      }))
+      .filter((b) => b.topic && b.keywords.length)
+      .slice(0, 50),
   };
 }
 

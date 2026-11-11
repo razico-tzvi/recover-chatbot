@@ -176,10 +176,10 @@ function BlocklistCard() {
   return (
     <Card
       title="Topic blocklist"
-      sub="Tickets mentioning these keywords never get an AI-written answer. With a set response, that exact text is used instead (sent in Live mode, a private note in Learning mode); without one, the ticket is only tagged and left for a person."
+      sub="Tickets and site-chat messages mentioning these keywords never get an AI-written answer. With a set response, that exact text is used instead (in chat it is sent as is; for tickets it is sent in Live mode, a private note in Learning mode). Without one, tickets are only tagged and left for a person, and the chat says customer service handles it and offers a handoff."
       action={rows.length < 50 && <Btn small onClick={() => setC({ blocklist: [...rows, { topic: "", keywords: "", response: "" }] })}>+ Add topic</Btn>}
     >
-      {rows.length === 0 && <p className="hint">No blocked topics. Common ones: chargebacks, legal threats, medical claims, wholesale pricing.</p>}
+      {rows.length === 0 && <p className="hint">No blocked topics. Common ones: chargebacks, legal questions, warranty claims, wholesale pricing.</p>}
       {rows.map((r, i) => (
         <div key={i} className="grid2" style={{ borderTop: i ? "1px solid var(--line)" : 0, paddingTop: i ? 14 : 0, marginBottom: 14 }}>
           <Field label="Topic" htmlFor={`bl-t-${i}`}>

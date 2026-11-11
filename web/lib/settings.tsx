@@ -38,7 +38,7 @@ function crmSettingsFrom(store: any, d: CrmDraft) {
   const split = (t: string) => t.split(",");
   const enabledAt = d.mode !== "off" && saved.mode === "off" ? new Date().toISOString() : saved.enabledAt;
   return resolveCrm({
-    crmSettings: { ...d, enabledAt, onlyTags: split(d.onlyTags), skipTags: split(d.skipTags) },
+    crmSettings: { ...d, enabledAt, blocklistSeeded: true, onlyTags: split(d.onlyTags), skipTags: split(d.skipTags) },
   });
 }
 
