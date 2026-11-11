@@ -2,7 +2,7 @@ import { ActionOptions } from "gadget-server";
 import { resolveCrm, resolveSignature, detectHumanRequest } from "../lib/defaults";
 import { freshdesk, freshdeskConnected } from "../lib/integrations";
 import { llmConfig } from "../lib/llm";
-import { draftReply, processTicket, withSignature } from "../lib/crm";
+import { crmStats, draftReply, processTicket, withSignature } from "../lib/crm";
 import { generateVoiceTone } from "../lib/voice";
 
 // CRM tab operations. The store always comes from the session's BigCommerce
@@ -11,6 +11,7 @@ import { generateVoiceTone } from "../lib/voice";
 //   syncNow   — queue a ticket-history sync for this store
 //   preview   — draft a reply to pasted text; nothing is posted to Freshdesk
 //   retry     — re-run a ticket that ended in "error"
+//   stats     — Freshdesk tab stats strip + approval rate (crmStats)
 //   voiceTone — generate Voice & tone from the synced agent replies; returned
 //               to the Context tab's editor, saved only with the settings
 export const run: ActionRun = async ({ params, api, connections, logger }) => {
@@ -63,6 +64,9 @@ export const run: ActionRun = async ({ params, api, connections, logger }) => {
       const out: any = await processTicket(ctx, store, crm, cfg, t);
       return { ok: out?.action !== "error", message: out?.action === "error" ? `Failed again: ${out.reason}` : `Done: ${out?.action}.` };
     }
+
+    case "stats":
+      return { ok: true, stats: await crmStats(api, store) };
 
     case "voiceTone": {
       try {

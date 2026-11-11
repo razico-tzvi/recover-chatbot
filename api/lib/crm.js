@@ -310,7 +310,7 @@ async function similarHistory(api, store, text) {
 
 async function recentCorrections(api, store) {
   return api.internal.crmTicket.findMany({
-    filter: { storeId: { equals: store.id }, similarity: { lessThan: 0.9 }, finalReply: { isSet: true } },
+    filter: { storeId: { equals: store.id }, similarity: { lessThan: APPROVED_SIMILARITY }, finalReply: { isSet: true } },
     sort: { feedbackAt: "Descending" },
     select: { subject: true, draft: true, finalReply: true },
     first: 3,
@@ -353,6 +353,45 @@ export async function collectFeedback(ctx, store) {
     }
   }
   return { checked: due.length, captured };
+}
+
+// An agent "approved" a draft when what they sent kept ≥ 90% of its wording
+// (same threshold as the Analytics edit rate and the corrections fed to drafts).
+export const APPROVED_SIMILARITY = 0.9;
+
+// Freshdesk tab stats strip, all time for the store.
+//   attempted       — tickets the bot took on (not the ones an agent had already answered)
+//   drafted         — private-note drafts (Learning, or Live when not confident)
+//   approvedAsIs / edited — drafts whose agent reply was captured, split at APPROVED_SIMILARITY
+//   skipped         — drafts the bot wasn't confident about (tagged ai-skipped)
+//   humanRequested  — customer asked for a person
+//   approvalRate    — approvedAsIs / (approvedAsIs + edited); 0 until a draft is reviewed
+export async function crmStats(api, store) {
+  const rows = [];
+  let page = await api.internal.crmTicket.findMany({
+    filter: { storeId: { equals: store.id } },
+    select: { action: true, confident: true, similarity: true, feedbackAt: true },
+    first: 250,
+  });
+  for (;;) {
+    rows.push(...page);
+    if (!page.hasNextPage || rows.length >= 20000) break;
+    page = await page.nextPage();
+  }
+  const drafts = rows.filter((r) => r.action === "drafted");
+  const reviewed = drafts.filter((r) => r.feedbackAt && typeof r.similarity === "number");
+  const approvedAsIs = reviewed.filter((r) => r.similarity >= APPROVED_SIMILARITY).length;
+  return {
+    attempted: rows.filter((r) => r.action !== "skipped").length,
+    drafted: drafts.length,
+    approvedAsIs,
+    edited: reviewed.length - approvedAsIs,
+    skipped: drafts.filter((r) => r.confident === false).length,
+    humanRequested: rows.filter((r) => r.action === "human").length,
+    replied: rows.filter((r) => r.action === "replied").length,
+    reviewed: reviewed.length,
+    approvalRate: reviewed.length ? approvedAsIs / reviewed.length : 0,
+  };
 }
 
 // Word-level edit similarity, 0..1 (1 = sent unchanged). Signatures and greetings

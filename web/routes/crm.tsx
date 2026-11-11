@@ -6,7 +6,14 @@ import { freshdeskConnected, freshdeskTicketUrl } from "../../api/lib/integratio
 import { useSettings, type CrmDraft, type Draft } from "../lib/settings";
 import { Alert, Btn, Card, Field, Loading, Seg, Tag, type Tone } from "../components/ui";
 
-type OpResult = { ok: boolean; message?: string; confident?: boolean; humanRequested?: boolean; tags?: string[]; reason?: string; reply?: string; model?: string };
+type CrmStats = {
+  attempted: number; drafted: number; approvedAsIs: number; edited: number; skipped: number;
+  humanRequested: number; replied: number; reviewed: number; approvalRate: number;
+};
+type OpResult = { ok: boolean; message?: string; confident?: boolean; humanRequested?: boolean; tags?: string[]; reason?: string; reply?: string; model?: string; stats?: CrmStats };
+
+const ZERO_STATS: CrmStats = { attempted: 0, drafted: 0, approvedAsIs: 0, edited: 0, skipped: 0, humanRequested: 0, replied: 0, reviewed: 0, approvalRate: 0 };
+const pct = (x: number) => `${Math.round(x * 100)}%`;
 
 async function crmOp(args: Record<string, unknown>): Promise<OpResult> {
   try {
@@ -72,6 +79,18 @@ function ModeCard() {
   const savedMode = store?.crmSettings?.mode || "off";
   const llmReady = (store?.llmProvider || "anthropic") === "anthropic" ? !!store?.llmModel && !!store?.llmApiKey : !!store?.llmModel;
 
+  // Stats are aggregated server-side over every ticket (the list below only loads the last 100).
+  const [stats, setStats] = useState<CrmStats>(ZERO_STATS);
+  const loadStats = async () => {
+    const r = await crmOp({ op: "stats" });
+    if (r.ok && r.stats) setStats(r.stats);
+  };
+  useEffect(() => {
+    loadStats();
+    const t = setInterval(loadStats, pollUntil ? 15000 : 60000);
+    return () => clearInterval(t);
+  }, [pollUntil]);
+
   const op = async (name: string) => {
     setBusy(name); setMsg(null);
     const r = await crmOp({ op: name });
@@ -87,22 +106,37 @@ function ModeCard() {
     >
       <div className="field" style={{ marginBottom: 14 }}>
         <label>Mode</label>
-        <Seg
-          name="crm-mode"
-          label="CRM mode"
-          value={c.mode}
-          onChange={(v) => setC({ mode: v })}
-          options={[
-            { value: "off", label: "Off" },
-            { value: "learning", label: "Learning" },
-            { value: "live", label: "Live" },
-          ]}
-        />
+        <div className="row">
+          <Seg
+            name="crm-mode"
+            label="CRM mode"
+            value={c.mode}
+            onChange={(v) => setC({ mode: v })}
+            options={[
+              { value: "off", label: "Off" },
+              { value: "learning", label: "Learning" },
+              { value: "live", label: "Live" },
+            ]}
+          />
+          <span title="Share of reviewed AI drafts the agent sent with ≥ 90% of the wording kept.">
+            <Tag tone={stats.reviewed ? (stats.approvalRate >= 0.8 ? "good" : "warn") : "muted"}>Approval rate {pct(stats.approvalRate)}</Tag>{" "}
+            <span className="hint">{stats.reviewed ? `${stats.approvedAsIs} of ${stats.reviewed} reviewed drafts approved as-is` : "no reviewed drafts yet"}</span>
+          </span>
+        </div>
         <p className="hint">
           {c.mode === "off" && "The bot doesn't touch tickets. History sync still runs nightly so drafts are ready when you switch on."}
           {c.mode === "learning" && <>Each new ticket gets an AI draft as a <b>private note</b> tagged <span className="mono">{c.draftTag}</span>. Nothing reaches the customer. When an agent sends their own reply, it's compared with the draft and the edits are used as feedback for later drafts.</>}
           {c.mode === "live" && <>Confident answers are <b>sent to the customer</b> as a public reply and tagged <span className="mono">{c.answeredTag}</span>. Anything the AI isn't sure about still lands as a private draft for an agent, tagged <span className="mono">{c.skippedTag}</span>; a customer who asks for a person is never answered — tagged <span className="mono">{c.humanTag}</span> and left open. Start in Learning mode until the drafts need few edits.</>}
         </p>
+      </div>
+      <div className="stats" style={{ marginBottom: 14 }}>
+        <Stat label="Attempted" value={stats.attempted} sub="New tickets the bot took on" />
+        <Stat label="Drafted" value={stats.drafted} sub="Private-note drafts for an agent" />
+        <Stat label="Approved as-is" value={stats.approvedAsIs} sub="Agent sent the draft (≥ 90% kept)" />
+        <Stat label="Edited" value={stats.edited} sub="Agent changed the draft before sending" />
+        <Stat label="Skipped" value={stats.skipped} sub={`Not confident — tagged ${c.skippedTag}`} />
+        <Stat label="Human-requested" value={stats.humanRequested} sub={`Asked for a person — tagged ${c.humanTag}`} />
+        <Stat label="Approval rate" value={pct(stats.approvalRate)} sub={stats.reviewed ? `${stats.reviewed} reviewed drafts` : "No reviewed drafts yet"} />
       </div>
       {c.mode !== savedMode && <Alert tone="warn">Mode change isn't saved yet — click Save settings.</Alert>}
       {!llmReady && <Alert tone="warn">Connect Anthropic (API key and model) on the Integrations tab — drafts use the CRM model set there.</Alert>}
@@ -135,6 +169,16 @@ function ModeCard() {
       </div>
       {msg && <Alert tone={msg.ok ? "good" : "crit"}>{msg.message}</Alert>}
     </Card>
+  );
+}
+
+function Stat({ label, value, sub }: { label: string; value: number | string; sub?: string }) {
+  return (
+    <div className="stat">
+      <div className="label">{label}</div>
+      <div className="value">{typeof value === "number" ? value.toLocaleString() : value}</div>
+      {sub && <div className="hint">{sub}</div>}
+    </div>
   );
 }
 

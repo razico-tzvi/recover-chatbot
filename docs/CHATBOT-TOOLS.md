@@ -238,6 +238,13 @@ Settings tabs share one draft (`web/lib/settings.tsx`) with **Discard** /
   incentive is shown but disabled until phase 4.
 - **CRM** (`web/routes/crm.tsx`): ticket answering, see above. Titled
   "Freshdesk" once connected; a settings tab (shared Save).
+  Mode card: approval rate beside the mode switch, and a stats strip
+  (`crmAdmin` op `stats` → `crmStats` in `crm.js`, all tickets for the store):
+  attempted (all rows except "agent already replied"), drafted, approved as-is /
+  edited (drafts whose agent reply was captured, split at
+  `APPROVED_SIMILARITY` = 0.9 kept wording), skipped (not-confident drafts,
+  `ai-skipped`), human-requested, approval rate = approved as-is ÷ reviewed
+  (0% until a draft is reviewed). All zeros while nothing has been handled.
 - **Analytics** (`web/routes/analytics.tsx`): see Analytics above.
 - **Learning** (`web/routes/learning.tsx`): see Sales learning loop above.
 - **API**: "coming soon" panel (`web/routes/comingSoon.tsx`).
