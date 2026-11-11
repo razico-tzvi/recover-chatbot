@@ -253,6 +253,27 @@ export async function activate(api, store, row, content) {
   return updated;
 }
 
+// A playbook written outside the learning loop (PUT /v1/context/salesPlaybook):
+// saved as the next version and made live at once, so it keeps the version
+// history, per-version conversion and rollback like an approved proposal.
+export async function publishPlaybook(api, store, content, { trigger = "api", rationale = "" } = {}) {
+  const all = await versions(api, store);
+  const version = all.reduce((m, v) => Math.max(m, v.version || 0), 0) + 1;
+  const row = await api.internal.salesPlaybook.create({
+    storeId: store.id,
+    version,
+    status: "proposed",
+    content: String(content).trim().slice(0, PLAYBOOK_MAX_CHARS),
+    rationale,
+    changeSummary: [],
+    model: "",
+    trigger,
+    edited: false,
+    basedOn: null,
+  });
+  return activate(api, store, row);
+}
+
 export async function deactivate(api, store) {
   await retireActive(api, store);
   await api.internal.bigcommerce.store.update(store.id, { salesPlaybook: "" });

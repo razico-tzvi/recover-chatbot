@@ -429,16 +429,37 @@ export function questionKey(q) {
 
 // ─────────────────────────── REST API (API tab) ───────────────────────────
 
-// Resources an API key can be scoped to. Every endpoint is read-only and
-// returns only the key's own store (api/lib/publicApi.js).
+// Resources an API key can be scoped to. Every endpoint returns or changes only
+// the key's own store (api/lib/publicApi.js). `write` endpoints also need a
+// key with read-write access (API_ACCESS); the other resources are read-only.
 export const API_SCOPES = [
   { key: "conversations", label: "Conversations", endpoints: ["GET /v1/conversations", "GET /v1/conversations/{sessionId}"], hint: "Chat sessions and full transcripts" },
   { key: "analytics", label: "Analytics", endpoints: ["GET /v1/analytics"], hint: "Overview, cost by model, funnel, sales, support topics, daily rows and a comparison period" },
-  { key: "context", label: "Context", endpoints: ["GET /v1/context"], hint: "Guidelines, FAQ, voice & tone, safeguards text, sales playbook" },
+  { key: "context", label: "Context", endpoints: ["GET /v1/context"], write: ["PUT /v1/context/{source}"], hint: "Guidelines, FAQ, voice & tone, safeguards text, incentive text, sales playbook", writeHint: "Replace one context source's text, saved like an admin save (sales playbook: a new live version)" },
   { key: "feedback", label: "Feedback", endpoints: ["GET /v1/feedback"], hint: "Shopper ratings and CRM draft-vs-sent feedback" },
   { key: "learning", label: "Learning", endpoints: ["GET /v1/learning"], hint: "Playbook versions and their conversion stats" },
-  { key: "settings", label: "Settings", endpoints: ["GET /v1/settings"], hint: "Branding, features, safeguards, CRM and learning settings (never secrets)" },
+  { key: "settings", label: "Settings", endpoints: ["GET /v1/settings"], write: ["PATCH /v1/settings"], hint: "Branding, features, safeguards, CRM and learning settings (never secrets)", writeHint: "Change branding, features, safeguards, handoff and learning settings (not LLM, CRM or secrets)" },
   { key: "safety", label: "Safety events", endpoints: ["GET /v1/safety-events"], hint: "Rate-limit, lockout and flag events" },
 ];
+// A key's access level. Read-write only adds the `write` endpoints of the key's scopes.
+export const API_ACCESS = [
+  { key: "read", label: "Read", hint: "GET endpoints only" },
+  { key: "readwrite", label: "Read & write", hint: "Also the write endpoints of Context and Settings" },
+];
+// Context sources writable with PUT /v1/context/{source}: URL name → store field.
+// A text equal to its default is saved as "" (like the admin), so the store keeps
+// following the built-in default.
+export const API_CONTEXT_SOURCES = {
+  guidelines: { field: "systemPrompt", label: "General guidelines", fallback: DEFAULT_GUIDELINES },
+  faq: { field: "faq", label: "Store FAQ & policies", fallback: DEFAULT_FAQ },
+  voiceTone: { field: "voiceTone", label: "Voice & tone", fallback: DEFAULT_VOICE_TONE },
+  safeguardsInstructions: { field: "safeguardsInstructions", label: "Safeguards instructions", fallback: DEFAULT_SAFEGUARDS_INSTRUCTIONS },
+  incentiveInstructions: { field: "incentiveInstructions", label: "Incentive instructions", fallback: DEFAULT_INCENTIVE_INSTRUCTIONS },
+  salesPlaybook: { field: "salesPlaybook", label: "Sales playbook", fallback: "" },
+};
+export const API_CONTEXT_MAX_CHARS = 50000;
+// Sections of PATCH /v1/settings. LLM, CRM (live mode posts on customer
+// tickets) and secrets stay admin-only.
+export const API_WRITABLE_SETTINGS = ["branding", "features", "safeguards", "handoff", "learning"];
 export const API_EXPIRY_DAYS = [30, 90, 180, 365]; // 0 = never, also offered
 export const API_MAX_KEYS = 20; // active keys per store

@@ -14,7 +14,7 @@ Admin v2 (spec: "Recover AI Chatbot - Admin v2 Requirements", ClickUp
 context sources + exports, Integrations tab, feature toggles, safeguards + rate
 limiting. **Phase 2** = CRM ticket answering (Freshdesk), below. **Phase 3a** =
 Analytics tab, below. **Learning** = the sales learning loop, below. **API** =
-API keys + read-only REST endpoints, below. The closing incentive shows as
+API keys (read or read-write) + REST endpoints, below. The closing incentive shows as
 "coming soon".
 
 ## API tab (REST API)
@@ -26,14 +26,15 @@ current store only), model `apiKey`, `web/routes/api.tsx`. Scope list
 
 | What | How |
 |---|---|
-| Keys | `rak_` + 32 random bytes (base64url). Only the SHA-256 (`keyHash`) and a display `prefix` are stored; the secret is shown once at creation. Each key has a **label**, **scopes** (resources), optional **expiry** (30/90/180/365 days or never). Max 20 active per store. **Revoke** is immediate; revoked/expired keys can then be removed. `lastUsedAt` is updated at most once a minute. |
-| Auth | `Authorization: Bearer rak_…` (or `X-Api-Key`). 401 missing/invalid/expired/revoked, 403 missing scope, 400 bad query, 404 unknown conversation; body `{"error": "…"}`. The store is always the key's store. |
-| Endpoints (all GET) | `/v1/me` (any key) · `/v1/conversations`, `/v1/conversations/{sessionId}` (conversations) · `/v1/analytics?days=` or `?from=&to=`, `&compare=true` (analytics, same numbers as the tab) · `/v1/context` (context) · `/v1/feedback?source=ratings\|crm` (feedback) · `/v1/learning` (learning) · `/v1/settings` (settings) · `/v1/safety-events?kind=` (safety) |
+| Keys | `rak_` + 32 random bytes (base64url). Only the SHA-256 (`keyHash`) and a display `prefix` are stored; the secret is shown once at creation. Each key has a **label**, an **access** level (`read` or `readwrite`; keys without one are read), **scopes** (resources), optional **expiry** (30/90/180/365 days or never). Max 20 active per store. **Revoke** is immediate; revoked/expired keys can then be removed. `lastUsedAt` is updated at most once a minute. |
+| Auth | `Authorization: Bearer rak_…` (or `X-Api-Key`). 401 missing/invalid/expired/revoked, 403 missing scope or a write with a read-only key, 400 bad query/body, 404 unknown conversation or context source; body `{"error": "…"}`. The store is always the key's store. |
+| Read endpoints (GET) | `/v1/me` (any key) · `/v1/conversations`, `/v1/conversations/{sessionId}` (conversations) · `/v1/analytics?days=` or `?from=&to=`, `&compare=true` (analytics, same numbers as the tab) · `/v1/context` (context) · `/v1/feedback?source=ratings\|crm` (feedback) · `/v1/learning` (learning) · `/v1/settings` (settings) · `/v1/safety-events?kind=` (safety) |
+| Write endpoints (read-write keys) | `PUT /v1/context/{source}` `{"content": "…"}` (context) — source `guidelines`, `faq`, `voiceTone`, `safeguardsInstructions`, `incentiveInstructions`, `salesPlaybook` (`API_CONTEXT_SOURCES`). The five text blocks save like the admin's Save settings (text equal to the default, or empty, is stored as `""` = built-in default; max 50,000 chars). `salesPlaybook` becomes a new `salesPlaybook` version (`trigger: "api"`, shown "via API" on the Learning tab) and goes live via `learning.js` `publishPlaybook`; empty turns the playbook off. Returns the source's new content. · `PATCH /v1/settings` (settings) — partial, same shape as `GET /v1/settings`, only `branding`, `features`, `safeguards`, `handoff` (`destination`, `email`), `learning` (`API_WRITABLE_SETTINGS`); values are validated (400 with the field name) then normalized by the `resolve*` helpers; LLM, CRM and secrets stay admin-only. Returns the full updated settings. |
 | Lists | Newest first; `limit` (1–200, default 50), `since` / `until` (ISO, on createdAt), `cursor` = previous page's `nextCursor` (createdAt of its last row; `null` on the last page). Conversations also filter on `needsHuman`, `flagged`, `converted` (`=true`). |
 | Never returned | Shopper IPs, LLM/Freshdesk/ShipStation keys, the handoff webhook URL (only `webhookConfigured`), key hashes. |
 
-Everything is read-only for now; write endpoints (e.g. updating context or
-settings) are not built.
+Only Context and Settings have write endpoints; every other resource is read-only.
+A read-write key still needs the resource's scope.
 
 ## Analytics (phase 3a)
 

@@ -299,7 +299,7 @@ function VersionsCard({ data, busy, act, onView }: { data: Status; busy: string 
           <tbody>
             {rows.map((r) => (
               <tr key={r.key}>
-                <td><b>{r.label}</b>{r.v?.edited && <span className="desc"> · edited</span>}</td>
+                <td><b>{r.label}</b>{r.v?.edited && <span className="desc"> · edited</span>}{r.v?.trigger === "api" && <span className="desc"> · via API</span>}</td>
                 <td>
                   {r.v ? <Tag tone={STATUS_TAG[r.v.status].tone}>{STATUS_TAG[r.v.status].label}</Tag>
                     : !data.state.activeVersion ? <Tag tone="good">Live</Tag> : <Tag>Baseline</Tag>}

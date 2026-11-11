@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../api";
-import { API_EXPIRY_DAYS, API_MAX_KEYS, API_SCOPES } from "../../api/lib/defaults";
+import { API_ACCESS, API_CONTEXT_SOURCES, API_EXPIRY_DAYS, API_MAX_KEYS, API_SCOPES, API_WRITABLE_SETTINGS } from "../../api/lib/defaults";
 import { Alert, Btn, Card, Field, Loading, Modal, Tag, type Tone } from "../components/ui";
 
 type Key = {
-  id: string; label: string; prefix: string; scopes: string[];
+  id: string; label: string; prefix: string; access: "read" | "readwrite"; scopes: string[];
   createdAt: string; expiresAt: string | null; lastUsedAt: string | null; revokedAt: string | null;
   state: "active" | "expired" | "revoked";
 };
@@ -62,7 +62,7 @@ export const ApiPage = () => {
     <>
       <Card
         title="API keys"
-        sub={`Read-only REST access to this store's data. Each key is labeled, limited to the resources you pick and can expire. Up to ${API_MAX_KEYS} active keys.`}
+        sub={`REST access to this store's data. Each key is labeled, read-only or read-write, limited to the resources you pick and can expire. Up to ${API_MAX_KEYS} active keys.`}
         action={<Btn primary onClick={() => setCreating(true)} disabled={active >= API_MAX_KEYS}>New API key</Btn>}
       >
         {error && <Alert tone="crit">{error}</Alert>}
@@ -73,13 +73,14 @@ export const ApiPage = () => {
           <div className="tablewrap">
             <table>
               <thead>
-                <tr><th>Label</th><th>Key</th><th>Scopes</th><th>Created</th><th>Expires</th><th>Last used</th><th>Status</th><th /></tr>
+                <tr><th>Label</th><th>Key</th><th>Access</th><th>Scopes</th><th>Created</th><th>Expires</th><th>Last used</th><th>Status</th><th /></tr>
               </thead>
               <tbody>
                 {keys.map((k) => (
                   <tr key={k.id}>
                     <td><b>{k.label}</b></td>
                     <td className="mono" style={{ whiteSpace: "nowrap" }}>{k.prefix}…</td>
+                    <td style={{ whiteSpace: "nowrap" }}>{k.access === "readwrite" ? <Tag tone="warn">Read & write</Tag> : <Tag>Read</Tag>}</td>
                     <td>{k.scopes.map(scopeLabel).join(", ")}</td>
                     <td style={{ whiteSpace: "nowrap" }}>{date(k.createdAt)}</td>
                     <td style={{ whiteSpace: "nowrap" }}>{k.expiresAt ? date(k.expiresAt) : "Never"}</td>
@@ -98,7 +99,7 @@ export const ApiPage = () => {
         )}
       </Card>
 
-      <Card title="Endpoints" sub="Every endpoint is GET, returns JSON and only ever returns this store's data. Shopper IPs, API keys and other secrets are never returned.">
+      <Card title="Endpoints" sub="Every endpoint returns JSON and only ever reads or changes this store's data. GET endpoints work with any key that has the scope; write endpoints need a read-write key. Shopper IPs, API keys and other secrets are never returned.">
         <p className="hint" style={{ marginTop: 0 }}>Send the key as a bearer token:</p>
         <pre className="codebox mono">{`curl ${base}/v1/conversations?limit=20 \\\n  -H "Authorization: Bearer rak_…"`}</pre>
         <div className="tablewrap" style={{ marginTop: 12 }}>
@@ -109,8 +110,11 @@ export const ApiPage = () => {
               {API_SCOPES.map((s) => (
                 <tr key={s.key}>
                   <td>{s.label}</td>
-                  <td className="mono">{s.endpoints.map((e) => <div key={e}>{e}</div>)}</td>
-                  <td>{s.hint}</td>
+                  <td className="mono">
+                    {s.endpoints.map((e) => <div key={e}>{e}</div>)}
+                    {(s.write || []).map((e) => <div key={e}>{e} <Tag tone="warn">read & write</Tag></div>)}
+                  </td>
+                  <td>{s.hint}{s.writeHint && <div className="desc">Write: {s.writeHint}</div>}</td>
                 </tr>
               ))}
             </tbody>
@@ -126,10 +130,21 @@ export const ApiPage = () => {
           <span className="mono">days</span> (1–366, ending today) or <span className="mono">from</span> / <span className="mono">to</span> (YYYY-MM-DD, UTC, inclusive),
           plus <span className="mono">compare=true</span> for the period before.
         </p>
+        <div className="ghead">Writes</div>
+        <p className="hint" style={{ marginTop: 0 }}>
+          <span className="mono">PUT /v1/context/{"{source}"}</span> takes <span className="mono">{`{"content": "…"}`}</span>; source is one of{" "}
+          {Object.keys(API_CONTEXT_SOURCES).map((k, i) => <span key={k}>{i ? ", " : ""}<span className="mono">{k}</span></span>)}.
+          It saves like Save settings on the Context tab: the text equal to the default, or empty, means the built-in default.
+          For <span className="mono">salesPlaybook</span> the text becomes a new live version (empty turns the playbook off); roll back on the Learning tab.{" "}
+          <span className="mono">PATCH /v1/settings</span> takes any of{" "}
+          {API_WRITABLE_SETTINGS.map((k, i) => <span key={k}>{i ? ", " : ""}<span className="mono">{k}</span></span>)}, in the shape <span className="mono">GET /v1/settings</span> returns
+          (only the fields you send change) and returns the updated settings.
+        </p>
+        <pre className="codebox mono">{`curl -X PUT ${base}/v1/context/faq \\\n  -H "Authorization: Bearer rak_…" -H "Content-Type: application/json" \\\n  -d '{"content": "## Shipping\\n…"}'`}</pre>
         <div className="ghead">Errors</div>
         <p className="hint" style={{ marginTop: 0 }}>
-          <span className="mono">401</span> missing, invalid, expired or revoked key · <span className="mono">403</span> the key lacks that scope ·{" "}
-          <span className="mono">400</span> bad query · <span className="mono">404</span> unknown conversation. The body is <span className="mono">{`{"error": "…"}`}</span>.
+          <span className="mono">401</span> missing, invalid, expired or revoked key · <span className="mono">403</span> the key lacks that scope, or is read-only and the request writes ·{" "}
+          <span className="mono">400</span> bad query or body · <span className="mono">404</span> unknown conversation or context source. The body is <span className="mono">{`{"error": "…"}`}</span>.
         </p>
       </Card>
 
@@ -166,12 +181,13 @@ export const ApiPage = () => {
 
 function CreateModal({ onClose, onCreate, busy, error }: {
   onClose: () => void;
-  onCreate: (args: { label: string; scopes: string[]; expiresInDays: number }) => void;
+  onCreate: (args: { label: string; access: string; scopes: string[]; expiresInDays: number }) => void;
   busy: boolean;
   error?: string;
 }) {
   const [label, setLabel] = useState("");
   const [scopes, setScopes] = useState<string[]>([]);
+  const [access, setAccess] = useState("read");
   const [days, setDays] = useState(90);
   const toggle = (k: string) => setScopes((s) => (s.includes(k) ? s.filter((x) => x !== k) : [...s, k]));
   return (
@@ -179,7 +195,7 @@ function CreateModal({ onClose, onCreate, busy, error }: {
       title="New API key"
       sub="Give each integration its own key with only the resources it needs."
       onClose={onClose}
-      footer={<Btn primary loading={busy} disabled={!label.trim() || !scopes.length} onClick={() => onCreate({ label: label.trim(), scopes, expiresInDays: days })}>Create key</Btn>}
+      footer={<Btn primary loading={busy} disabled={!label.trim() || !scopes.length} onClick={() => onCreate({ label: label.trim(), access, scopes, expiresInDays: days })}>Create key</Btn>}
     >
       {error && <Alert tone="crit">{error}</Alert>}
       <Field label="Label" htmlFor="k-label" hint="Where the key is used, e.g. “Looker dashboard”.">
@@ -191,11 +207,22 @@ function CreateModal({ onClose, onCreate, busy, error }: {
           <option value={0}>Never</option>
         </select>
       </Field>
-      <div className="ghead" style={{ marginTop: 14 }}>Can read</div>
+      <div className="ghead" style={{ marginTop: 14 }}>Access</div>
+      {API_ACCESS.map((a) => (
+        <label key={a.key} className="frow" style={{ cursor: "pointer" }}>
+          <input type="radio" name="k-access" checked={access === a.key} onChange={() => setAccess(a.key)} />
+          <span className="name">{a.label}<div className="desc">{a.hint}</div></span>
+        </label>
+      ))}
+      <div className="ghead" style={{ marginTop: 14 }}>Resources</div>
       {API_SCOPES.map((s) => (
         <label key={s.key} className="frow" style={{ cursor: "pointer" }}>
           <input type="checkbox" checked={scopes.includes(s.key)} onChange={() => toggle(s.key)} />
-          <span className="name">{s.label}<div className="desc">{s.hint}</div></span>
+          <span className="name">
+            {s.label}
+            {access === "readwrite" && <> {s.write ? <Tag tone="warn">read & write</Tag> : <Tag>read only</Tag>}</>}
+            <div className="desc">{access === "readwrite" && s.writeHint ? `${s.hint}. Write: ${s.writeHint}` : s.hint}</div>
+          </span>
         </label>
       ))}
     </Modal>

@@ -5,11 +5,13 @@ import type { GadgetModel } from "gadget-server";
 
 // A store's REST API key (API tab, api/lib/publicApi.js). Only the SHA-256
 // hash of the secret is stored; `prefix` is the first characters, for display.
-// `scopes` is a list of resource names from API_SCOPES.
+// `scopes` is a list of resource names from API_SCOPES. `access` is "read" or
+// "readwrite" (API_ACCESS); empty = read (keys made before access existed).
 export const schema: GadgetModel = {
   type: "gadget/model-schema/v2",
   storageKey: "apiKey-model",
   fields: {
+    access: { type: "string", storageKey: "apiKey-access" },
     expiresAt: {
       type: "dateTime",
       includeTime: true,
