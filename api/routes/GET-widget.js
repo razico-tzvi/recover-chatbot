@@ -318,6 +318,25 @@ function widgetSource() {
   }
   updateVoiceBtn();
 
+  // ---- page API: lets the theme open the chat from its own buttons ----
+  // window.RecoverChat.open(question?, { productId? }) opens the panel and, given a question, sends it.
+  // window.RecoverChat.hideLauncher() removes the floating bubble and callout when the page has its own entry points.
+  // "recoverchat:ready" fires on document once this exists, for pages whose scripts ran first.
+  var ctxProductId = null;
+  window.RecoverChat = {
+    open: function (question, opts) {
+      if (opts && Number(opts.productId) > 0) ctxProductId = Math.floor(Number(opts.productId));
+      if (!open) toggle();
+      var q = String(question || "").trim();
+      if (q) { inputEl.value = q; updateVoiceBtn(); send(); }
+    },
+    hideLauncher: function () {
+      dismissCallout();
+      launcher.style.display = "none";
+    },
+  };
+  try { document.dispatchEvent(new CustomEvent("recoverchat:ready")); } catch (e) {}
+
   // ---- UI helpers ----
   function toggle() {
     open = !open;
@@ -452,7 +471,7 @@ function widgetSource() {
   function pageContext() {
     var ctx = { url: location.href, title: document.title };
     var el = document.querySelector('[data-cart-item-add] input[name="product_id"]') || document.querySelector('input[name="product_id"]');
-    var id = el && parseInt(el.value, 10);
+    var id = (el && parseInt(el.value, 10)) || ctxProductId;
     if (id) ctx.productId = id;
     return ctx;
   }
