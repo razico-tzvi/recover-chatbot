@@ -82,6 +82,11 @@ export const DEFAULT_BRANDING = {
     "This is an AI assistant trained to answer questions about our products. If you need a human, just ask and we'll connect you with support.",
 };
 
+// Freshdesk ticket history (crmHistory) kept for the bot and Voice & tone: a rolling window.
+// Older tickets are pruned by the history sync (6 months since 23 Nov 2026; was 12).
+export const HISTORY_MONTHS = 6;
+export const HISTORY_WINDOW_MS = Math.round(HISTORY_MONTHS * 30.44 * 24 * 3600 * 1000);
+
 // General guidelines as the prompts use them. Old stores pasted the FAQ into the
 // guidelines; anything from the FAQ heading on is dropped (the FAQ has its own block).
 export const FAQ_MARKER = "--- STORE POLICIES & FAQ ---";

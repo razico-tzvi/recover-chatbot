@@ -5,14 +5,14 @@ import { seedVoiceTone, VOICE_SEED_REPLIES } from "../lib/voice";
 
 // Nightly: pull resolved/closed Freshdesk tickets (agent public replies only)
 // into crmHistory for every connected store. Incremental via crmState.historyCursor;
-// the first run looks back 12 months. When a run stops at Freshdesk's rate limit
+// the first run looks back HISTORY_MONTHS (defaults.js, 6). When a run stops at Freshdesk's rate limit
 // (or the per-run cap) it schedules its own continuation for that store, up to
 // MAX_CONTINUATIONS times, instead of sleeping inside the action.
 // Once a store's sync chain finishes (or it has VOICE_SEED_REPLIES tickets stored),
 // its Voice & tone is seeded once from the stored agent replies — only while the
 // block is still the built-in default.
 // Then (once the list is caught up) it backfills archived tickets by id — Freshdesk
-// drops them from the list. A 12-month backfill on a 40/min plan pauses for the
+// drops them from the list. A full-window backfill on a 40/min plan pauses for the
 // rate limit hundreds of times, so a chain may continue up to MAX_CONTINUATIONS;
 // it ends on its own as soon as a run is caught up.
 const MAX_CONTINUATIONS = 1500;

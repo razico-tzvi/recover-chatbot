@@ -2,7 +2,7 @@ import { useFindFirst } from "@gadgetinc/react";
 import { Fragment, useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../api";
-import { GUARDRAILS } from "../../api/lib/defaults";
+import { GUARDRAILS, HISTORY_MONTHS } from "../../api/lib/defaults";
 import { freshdeskConnected } from "../../api/lib/integrations";
 import { CONTEXT_DEFAULTS, useSettings, type ContextKey } from "../lib/settings";
 import { download, downloadRows, stamp, textBlockRows } from "../lib/download";
@@ -215,7 +215,7 @@ export const ContextPage = () => {
         <>
           <Btn small onClick={() => setEditing(editing === s.field ? null : s.field!)}>{editing === s.field ? "Close" : "Edit"}</Btn>
           {s.id === "voice" && freshdeskConnected(store) && (
-            <Btn small loading={busy === "voice-gen"} onClick={generateVoice} title="Analyze the agent replies synced from Freshdesk in the last 12 months">Generate from tickets</Btn>
+            <Btn small loading={busy === "voice-gen"} onClick={generateVoice} title={`Analyze the agent replies synced from Freshdesk in the last ${HISTORY_MONTHS} months`}>Generate from tickets</Btn>
           )}
           {exportBtns(s)}
         </>
@@ -233,7 +233,7 @@ export const ContextPage = () => {
       if (!freshdeskConnected(store)) return <span className="hint">Connect Freshdesk under Integrations</span>;
       return (
         <>
-          <Btn small loading={busy === "resync"} onClick={resync} title="Pull resolved/closed tickets from the last 12 months now">{crmState.lastSyncAt ? "Re-sync now" : "Sync now"}</Btn>
+          <Btn small loading={busy === "resync"} onClick={resync} title={`Pull resolved/closed tickets from the last ${HISTORY_MONTHS} months now`}>{crmState.lastSyncAt ? "Re-sync now" : "Sync now"}</Btn>
           {exportBtns(s)}
         </>
       );

@@ -4,7 +4,7 @@
 // Voice & tone (context source 8) generated from the agent replies the Freshdesk
 // history sync stored in crmHistory. Server-only.
 //
-// generateVoiceTone — reads the last 12 months of stored agent replies, samples
+// generateVoiceTone — reads the last HISTORY_MONTHS months of stored agent replies, samples
 //                     them evenly over time and asks the store's analysis model
 //                     for a style guide. Returns the text; never saves it.
 // seedVoiceTone     — one-time: after a history sync finishes (or once enough
@@ -15,8 +15,9 @@
 
 import { llmConfig, complete } from "./llm";
 import { saveState } from "./crm";
+import { HISTORY_MONTHS, HISTORY_WINDOW_MS } from "./defaults";
 
-const WINDOW_MS = 365 * 24 * 3600 * 1000;
+const WINDOW_MS = HISTORY_WINDOW_MS;
 export const VOICE_MIN_REPLIES = 20;
 // Auto-seed before the backfill finishes once this many tickets are synced.
 export const VOICE_SEED_REPLIES = 200;
@@ -29,7 +30,7 @@ export const VOICE_MAX_CHARS = 2500;
 
 const SYSTEM = `You write the "Voice & tone" section of the instructions for an online store's AI support assistant. The same section is used for live chat on the storefront and for email replies to support tickets.
 
-You get a sample of real replies the store's human support agents sent customers over the last year. Describe how these agents write, so the assistant sounds like them.
+You get a sample of real replies the store's human support agents sent customers over the last few months. Describe how these agents write, so the assistant sounds like them.
 
 Cover only style, for example:
 - overall register (formal or casual, warm or matter-of-fact) and how personal it is
@@ -118,7 +119,7 @@ export async function generateVoiceTone(ctx, store) {
 
   const replies = await recentReplies(ctx.api, store);
   if (replies.length < VOICE_MIN_REPLIES) {
-    throw new Error(`Not enough agent replies yet: ${replies.length} from the last 12 months are synced (needs at least ${VOICE_MIN_REPLIES}). Run Sync now on the CRM tab first.`);
+    throw new Error(`Not enough agent replies yet: ${replies.length} from the last ${HISTORY_MONTHS} months are synced (needs at least ${VOICE_MIN_REPLIES}). Run Sync now on the CRM tab first.`);
   }
 
   let budget = TOTAL_CHARS;
@@ -129,7 +130,7 @@ export async function generateVoiceTone(ctx, store) {
     budget -= t.length;
     picked.push({ ...r, text: t });
   }
-  const user = `${picked.length} agent replies, sampled from ${replies.length} sent in the last 12 months:\n\n` +
+  const user = `${picked.length} agent replies, sampled from ${replies.length} sent in the last ${HISTORY_MONTHS} months:\n\n` +
     picked.map((r, i) => `#${i + 1}\n"""\n${r.text}\n"""`).join("\n\n");
 
   let out = await complete(cfg, { system: SYSTEM, user, maxTokens: 1500, timeoutMs: 150_000 });

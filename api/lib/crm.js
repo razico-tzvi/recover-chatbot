@@ -43,7 +43,7 @@
 // backfillQuestions — once per store: fills `question` on rows saved before it existed.
 import {
   CRM_GUARDRAILS, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
-  resolveBranding, resolveGuidelines, resolveCrm, resolveSignature, matchBlocklist, detectHumanRequest,
+  resolveBranding, resolveGuidelines, HISTORY_WINDOW_MS, resolveCrm, resolveSignature, matchBlocklist, detectHumanRequest,
 } from "./defaults";
 import { freshdesk, freshdeskBudget, freshdeskConnected, FreshdeskRateLimit } from "./integrations";
 import { llmConfig, complete } from "./llm";
@@ -56,8 +56,8 @@ const MAX_NEW_PER_RUN = 10;
 const MAX_FEEDBACK_PER_RUN = 20;
 const FEEDBACK_WINDOW_MS = 14 * 24 * 3600 * 1000;
 const FEEDBACK_RECHECK_MS = 60 * 60 * 1000;
-// 12 months: Voice & tone is seeded from the last year of agent replies.
-const HISTORY_FIRST_SYNC_MS = 365 * 24 * 3600 * 1000;
+// Rolling window (HISTORY_MONTHS in defaults.js); Voice & tone is seeded from the same replies.
+const HISTORY_FIRST_SYNC_MS = HISTORY_WINDOW_MS;
 const MAX_HISTORY_PER_RUN = 150;
 const HISTORY_BUDGET_SHARE = 0.4;
 // Archived-ticket backfill (syncArchived).
@@ -731,9 +731,10 @@ export async function syncHistory(ctx, store) {
     }
   }
   const state = store.crmState || {};
-  // Rolling 12-month window. historyFrom records where the stored history starts;
+  // Rolling window (HISTORY_MONTHS). historyFrom records where the stored history starts;
   // stores first synced under the old 90-day lookback (no historyFrom, or a later
-  // one) walk back to 12 months once — tickets already stored are skipped cheaply.
+  // one) walk back to the window start once — tickets already stored are skipped cheaply.
+  // When the window shrinks, historyFrom moves forward and the caught-up prune below drops the rest.
   const windowStart = new Date(Date.now() - HISTORY_FIRST_SYNC_MS);
   const from = state.historyFrom ? new Date(state.historyFrom) : null;
   const restart = !state.historyCursor || !from || from.getTime() > windowStart.getTime() + 24 * 3600 * 1000;
@@ -798,7 +799,7 @@ export async function syncHistory(ctx, store) {
       logger.warn({ err, storeId: store.id, transient }, "crm history sync failed");
     }
   }
-  // Caught up: drop tickets that have rolled out of the 12-month window.
+  // Caught up: drop tickets that have rolled out of the window.
   if (!error && !retryAfter && !more) {
     try {
       await api.internal.crmHistory.deleteMany({ filter: { storeId: { equals: store.id }, ticketUpdatedAt: { lessThan: windowStart.toISOString() } } });
@@ -827,7 +828,7 @@ export async function syncHistory(ctx, store) {
 // are readable only by id (/tickets/archived/{id}), so this walks ids downward from
 // just above the oldest ticket the list still returns, saving resolved/closed ones
 // (agent public replies only, same rules as syncHistory), until it reaches a ticket
-// created before the 12-month window or ARCHIVE_MISS_LIMIT missing ids in a row.
+// created before the history window or ARCHIVE_MISS_LIMIT missing ids in a row.
 // Progress lives in crmState.archive; runs once per store (archive.done).
 export async function syncArchived(ctx, store) {
   const { api, logger } = ctx;

@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../api";
 import { freshdeskConnected, freshdeskTicketUrl } from "../../api/lib/integrations";
+import { HISTORY_MONTHS } from "../../api/lib/defaults";
 import { useSettings, type CrmDraft, type Draft } from "../lib/settings";
 import { Alert, Btn, Card, Field, Loading, Seg, Tag, type Tone } from "../components/ui";
 
@@ -162,7 +163,7 @@ function ModeCard() {
           <div className="ghead">Ticket history</div>
           <p>{(st.historyCount ?? 0).toLocaleString()} resolved tickets synced · last sync {fmt(st.lastSyncAt)}</p>
           <p className="hint">
-            Nightly, agent public replies only, rolling 12 months{st.historyFrom ? ` (tickets updated since ${new Date(st.historyFrom).toLocaleDateString()})` : ""}. Voice &amp; tone is seeded from it once.
+            Nightly, agent public replies only, rolling {HISTORY_MONTHS} months{st.historyFrom ? ` (tickets updated since ${new Date(st.historyFrom).toLocaleDateString()})` : ""}. Voice &amp; tone is seeded from it once.
           </p>
           {st.archive && (
             <p className="hint">

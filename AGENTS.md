@@ -108,7 +108,7 @@ setup (ggt dev + `stencil start` + the script tag in
   Its full-text search must use the public `api.crmHistory.findMany({ search })`:
   on production `api.internal.*.findMany` returns 0 rows for `search`.
 - `api/lib/voice.js` — Voice & tone (context source 8) generated from the
-  agent replies in `crmHistory` (last 12 months): seeded once after a history
+  agent replies in `crmHistory` (last `HISTORY_MONTHS` = 6 months, `defaults.js`; the history sync prunes older tickets): seeded once after a history
   sync while the block is still the default, or on demand via Context ›
   Voice & tone › Generate from tickets (fills the editor, saved with settings).
 - `api/lib/analytics.js` — Analytics tab (phase 3a): `getAnalytics` aggregates
