@@ -40,5 +40,5 @@ export const params = {
 
 export const options: ActionOptions = {
   triggers: { api: true, scheduler: [{ cron: "*/5 * * * *" }] },
-  timeoutMS: 900000,
+  timeoutMS: 240000, // under the 5-minute schedule so runs don't pile up
 };

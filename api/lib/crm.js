@@ -776,31 +776,42 @@ export async function syncTicket(ctx, store, ticketId, ticket = null) {
 }
 
 // Every few minutes: re-sync tickets updated recently (open or closed).
-export async function syncRecent(ctx, store, minutes = 30) {
-  const { api } = ctx;
+// Stops at a deadline so one slow run can never hang; the next 5-minute run picks up the rest.
+// A single ticket that fails is skipped instead of failing the whole run.
+export async function syncRecent(ctx, store, minutes = 30, deadlineMs = 90_000) {
+  const { api, logger } = ctx;
   if (!freshdeskConnected(store)) return { skipped: true };
   const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+  const deadline = Date.now() + deadlineMs;
   let synced = 0;
+  let failed = 0;
   try {
-    for (let page = 1; page <= 3; page++) {
+    outer: for (let page = 1; page <= 3; page++) {
       const tickets = await freshdesk(store, "GET", `/tickets?updated_since=${encodeURIComponent(since)}&order_by=updated_at&order_type=desc&per_page=30&page=${page}`);
       if (!tickets?.length) break;
       for (const t of tickets) {
-        const existing = await findHistory(api, store, t.id);
-        if (existing?.ticketUpdatedAt && new Date(existing.ticketUpdatedAt).getTime() === new Date(t.updated_at).getTime()) continue;
-        const budget = freshdeskBudget(store);
-        if (budget && budget.remaining < budget.total * HISTORY_BUDGET_SHARE) throw new FreshdeskRateLimit(60);
-        await syncTicket(ctx, store, t.id, t);
-        synced++;
+        if (Date.now() > deadline) break outer;
+        try {
+          const existing = await findHistory(api, store, t.id);
+          if (existing?.ticketUpdatedAt && new Date(existing.ticketUpdatedAt).getTime() === new Date(t.updated_at).getTime()) continue;
+          const budget = freshdeskBudget(store);
+          if (budget && budget.remaining < budget.total * HISTORY_BUDGET_SHARE) throw new FreshdeskRateLimit(60);
+          await syncTicket(ctx, store, t.id, t);
+          synced++;
+        } catch (err) {
+          if (err instanceof FreshdeskRateLimit) throw err;
+          failed++; // still inside the 30-minute window on the next run
+          logger?.warn({ err, ticketId: t.id, storeId: store.id }, "crm syncRecent: ticket skipped");
+        }
       }
       if (tickets.length < 30) break;
     }
   } catch (err) {
-    if (err instanceof FreshdeskRateLimit) return { synced, retryAfter: err.retryAfter || 60 };
+    if (err instanceof FreshdeskRateLimit) return { synced, failed, retryAfter: err.retryAfter || 60 };
     throw err;
   }
-  await refreshHistoryCount(api, store);
-  return { synced };
+  if (synced) await refreshHistoryCount(api, store);
+  return { synced, failed };
 }
 
 async function findHistory(api, store, ticketId) {
@@ -812,15 +823,20 @@ async function findHistory(api, store, ticketId) {
   return row || null;
 }
 
+// A failed count must never fail a sync (the sync's own outcome is already saved).
 async function refreshHistoryCount(api, store) {
-  let n = 0;
-  let page = await api.internal.crmHistory.findMany({ filter: { storeId: { equals: store.id } }, sort: [{ id: "Ascending" }], select: { id: true }, first: 250 });
-  n += page.length;
-  while (page.hasNextPage && n < 50_000) {
-    page = await page.nextPage();
+  try {
+    let n = 0;
+    let page = await api.internal.crmHistory.findMany({ filter: { storeId: { equals: store.id } }, sort: [{ id: "Ascending" }], select: { id: true }, first: 250 });
     n += page.length;
+    while (page.hasNextPage && n < 50_000) {
+      page = await page.nextPage();
+      n += page.length;
+    }
+    await saveState(api, store, { historyCount: n });
+  } catch (err) {
+    console.warn("crm: history count refresh failed", err?.message || err);
   }
-  await saveState(api, store, { historyCount: n });
 }
 
 // ─────────────────────────── formatting ───────────────────────────
