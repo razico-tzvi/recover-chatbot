@@ -44,7 +44,7 @@ type SyncRow = { label: string; at?: string | null; error?: string; never: strin
 // Integrations that pull data on a schedule; the others are queried live.
 function syncRows(id: Id, store: any): SyncRow[] {
   if (id === "bigcommerce") {
-    return [{ label: "Orders (hourly)", at: store?.analyticsState?.ordersSyncedAt, never: "Waiting for the first hourly order sync" }];
+    return [{ label: "Orders (hourly)", at: store?.analyticsState?.ordersSyncedAt, error: store?.analyticsState?.ordersSyncError || undefined, never: "Waiting for the first hourly order sync" }];
   }
   if (id === "freshdesk") {
     const c = store?.crmState || {};

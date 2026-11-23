@@ -30,7 +30,11 @@ export const run: ActionRun = async ({ params, api, connections, logger }) => {
     case "syncNow":
       if (!freshdeskConnected(store)) return { ok: false, message: "Connect Freshdesk on the Integrations tab first." };
       // A rate-limited sync has already scheduled its own continuation.
-      const paused = (store.crmState as any)?.syncPausedUntil;
+      const st = (store.crmState as any) || {};
+      if (st.syncRetryAt && new Date(st.syncRetryAt).getTime() > Date.now() - 30_000) {
+        return { ok: true, message: `The last history sync hit a network timeout; it retries automatically around ${new Date(st.syncRetryAt).toLocaleTimeString()}.` };
+      }
+      const paused = st.syncPausedUntil;
       if (paused && new Date(paused).getTime() > Date.now() - 30_000) {
         return { ok: true, message: "A history sync is already running — it continues automatically after Freshdesk's rate-limit window." };
       }

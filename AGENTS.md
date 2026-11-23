@@ -93,6 +93,13 @@ setup (ggt dev + `stencil start` + the script tag in
   syncs agent replies. Only tickets created after the mode left Off are
   touched. Don't run Check now / Live mode against a real helpdesk without
   the store owner's OK — it posts notes/replies on customer tickets.
+- `api/lib/guard.js` — time limits + retries for background jobs. Calls to the
+  app's own Gadget API can hang for 5 minutes (`UND_ERR_HEADERS_TIMEOUT`);
+  `guardApi(api, logger)` gives every `api.internal.*` call a 30 s limit and
+  retries reads / idempotent writes (not `create`). Use it in every scheduled
+  action (crmSyncHistory, crmSyncRecent, crmPoll, syncOrders do). A history sync
+  that still fails on a timeout retries the batch (`retry` param, up to 5×, 2 min
+  apart; Context shows "Retrying" + the error text, then "Sync error").
 - `api/lib/voice.js` — Voice & tone (context source 8) generated from the
   agent replies in `crmHistory` (last 12 months): seeded once after a history
   sync while the block is still the default, or on demand via Context ›

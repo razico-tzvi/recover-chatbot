@@ -156,6 +156,12 @@ export const ContextPage = () => {
       download(`context-all-${stamp()}.json`, JSON.stringify(bundle, null, 2), "application/json");
     });
 
+  // A history sync that hit a network timeout retries itself a few times before it's an error.
+  const syncRetrying = !!crmState.syncRetryAt && new Date(crmState.syncRetryAt).getTime() > Date.now() - 60_000;
+  const syncErrorText = crmState.lastSyncError
+    ? `${syncRetrying ? `Last attempt failed; retrying automatically around ${new Date(crmState.syncRetryAt).toLocaleTimeString()}` : "Last history sync failed"}${crmState.lastSyncErrorAt ? ` (${new Date(crmState.lastSyncErrorAt).toLocaleString()})` : ""}: ${crmState.lastSyncError}`
+    : "";
+
   const status = (s: Source) => {
     if (s.field) {
       const custom = draft[s.field].trim() !== CONTEXT_DEFAULTS[s.field].trim();
@@ -164,7 +170,7 @@ export const ContextPage = () => {
     if (s.id === "catalog") return catalog.error ? <Tag tone="crit">Error</Tag> : <Tag tone="good">Live</Tag>;
     if (s.id === "freshdesk") {
       if (!freshdeskConnected(store)) return <Tag>Not connected</Tag>;
-      if (crmState.lastSyncError) return <Tag tone="crit">Sync error</Tag>;
+      if (crmState.lastSyncError) return syncRetrying ? <Tag tone="warn">Retrying</Tag> : <Tag tone="crit">Sync error</Tag>;
       if (crmState.syncPausedUntil && new Date(crmState.syncPausedUntil) > new Date()) return <Tag tone="warn">Syncing</Tag>;
       return crmState.lastSyncAt ? <Tag tone="good">Synced</Tag> : <Tag tone="warn">Waiting for first sync</Tag>;
     }
@@ -260,6 +266,7 @@ export const ContextPage = () => {
               {actions(s)}
             </div>
             {s.id === "voice" && voiceGen && <Alert tone={voiceGen.tone}>{voiceGen.text}</Alert>}
+            {s.id === "freshdesk" && freshdeskConnected(store) && syncErrorText && <Alert tone={syncRetrying ? "warn" : "crit"}>{syncErrorText}</Alert>}
             {s.id === "freshdesk" && syncMsg && <Alert tone={syncMsg.tone}>{syncMsg.text}</Alert>}
             {s.field && editing === s.field && (
               <div className="editor">

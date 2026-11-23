@@ -20,6 +20,9 @@ export const run: ActionRun = async ({ params, api, connections, logger }) => {
     }
   }
 
+  // The hourly sync records a rejected BigCommerce token on the store (analytics.js).
+  syncError = syncError || (store as any)?.analyticsState?.ordersSyncError || null;
+
   const range = resolveRange({ days: params.days, from: params.from, to: params.to, compare: params.compare });
   return { ...(await storeAnalytics(api, store, range)), syncError };
 };

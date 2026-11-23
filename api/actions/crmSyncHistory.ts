@@ -1,5 +1,6 @@
 import { ActionOptions } from "gadget-server";
-import { storesFor, syncArchived, syncHistory } from "../lib/crm";
+import { saveState, storesFor, syncArchived, syncHistory } from "../lib/crm";
+import { errorText, guardApi, isTransient } from "../lib/guard";
 import { seedVoiceTone, VOICE_SEED_REPLIES } from "../lib/voice";
 
 // Nightly: pull resolved/closed Freshdesk tickets (agent public replies only)
@@ -15,24 +16,48 @@ import { seedVoiceTone, VOICE_SEED_REPLIES } from "../lib/voice";
 // rate limit hundreds of times, so a chain may continue up to MAX_CONTINUATIONS;
 // it ends on its own as soon as a run is caught up.
 const MAX_CONTINUATIONS = 1500;
+// A run that fails on a network hang / timeout (e.g. a Gadget API call that never
+// answers — every API call has a 30 s limit and is retried, see guard.js) is
+// retried as a batch from the saved cursor, RETRY_DELAY_S later, up to MAX_RETRIES
+// times in a row; only then does the Context tab show "Sync error".
+const MAX_RETRIES = 5;
+const RETRY_DELAY_S = 120;
 
-export const run: ActionRun = async ({ params, api, logger }) => {
+export const run: ActionRun = async ({ params, api: rawApi, logger }) => {
+  const api = guardApi(rawApi, logger);
   const ctx = { api, logger };
   const continuation = Number(params.continuation) || 0;
+  const retry = Number(params.retry) || 0;
   const results: Record<string, unknown> = {};
   for (const store of await storesFor(api, params.storeId)) {
     try {
-      // A chain for this store is already waiting out the rate limit: don't start a second one.
-      const paused = (store.crmState as any)?.syncPausedUntil;
-      if (!continuation && paused && new Date(paused).getTime() > Date.now() - 30_000) {
+      // A chain for this store is already waiting out the rate limit (or a retry): don't start a second one.
+      const st = (store.crmState as any) || {};
+      const paused = [st.syncPausedUntil, st.syncRetryAt].filter(Boolean).map((x: string) => new Date(x).getTime());
+      if (!continuation && paused.some((t: number) => t > Date.now() - 30_000)) {
         results[store.id] = { skipped: "chain running" };
         continue;
       }
-      let r: any = await syncHistory(ctx, store);
-      if (!r.skipped && !r.error && !r.retryAfter && !r.more && !(store.crmState as any)?.archive?.done) {
-        r = { ...(await syncArchived(ctx, store)), live: r };
+      let r: any;
+      try {
+        r = await syncHistory(ctx, store);
+        if (!r.skipped && !r.error && !r.retryAfter && !r.more && !(store.crmState as any)?.archive?.done) {
+          r = { ...(await syncArchived(ctx, store)), live: r };
+        }
+      } catch (err: any) {
+        // Thrown outside the batch loop (e.g. saving progress hung): same retry path.
+        r = { error: `Sync failed: ${errorText(err)}`, transient: isTransient(err) };
+        logger.warn({ err, storeId: store.id, transient: r.transient }, "crm history sync failed");
+        await saveState(api, store, { lastSyncAt: new Date().toISOString(), lastSyncError: r.error, lastSyncErrorAt: new Date().toISOString() }).catch(() => {});
       }
       results[store.id] = r;
+      if (r.error && r.transient && retry < MAX_RETRIES) {
+        const at = new Date(Date.now() + RETRY_DELAY_S * 1000).toISOString();
+        await api.enqueue(api.crmSyncHistory, { storeId: store.id, continuation: continuation + 1, retry: retry + 1 }, { startAt: at });
+        await saveState(api, store, { syncRetryAt: at, syncRetries: retry + 1 }).catch(() => {});
+        logger.info({ storeId: store.id, retry: retry + 1, at, error: r.error }, "crm history sync retries the batch later");
+        continue;
+      }
       if ((r.retryAfter || r.more) && continuation < MAX_CONTINUATIONS) {
         const delayS = r.retryAfter ? r.retryAfter + 5 : 5;
         await api.enqueue(
@@ -54,6 +79,7 @@ export const run: ActionRun = async ({ params, api, logger }) => {
       }
     } catch (err) {
       logger.error({ err, storeId: store.id }, "crmSyncHistory failed for store");
+      results[store.id] = { error: errorText(err) };
     }
   }
   return results;
@@ -62,6 +88,7 @@ export const run: ActionRun = async ({ params, api, logger }) => {
 export const params = {
   storeId: { type: "string" },
   continuation: { type: "number" },
+  retry: { type: "number" },
 };
 
 export const options: ActionOptions = {

@@ -38,6 +38,7 @@ import {
 } from "./defaults";
 import { freshdesk, freshdeskBudget, freshdeskConnected, FreshdeskRateLimit } from "./integrations";
 import { llmConfig, complete } from "./llm";
+import { errorText, isTransient } from "./guard";
 
 const STATUS_OPEN = 2;
 const STATUS_RESOLVED = 4;
@@ -218,7 +219,7 @@ export async function pollStore(ctx, store) {
     // A rate limit just ends this tick; the cursor is kept and the next tick resumes.
     if (err instanceof FreshdeskRateLimit) retryAfter = err.retryAfter || 60;
     else {
-      error = `Polling failed: ${err?.message || err}`;
+      error = `Polling failed: ${errorText(err)}`;
       logger.warn({ err, storeId: store.id }, "crm poll failed");
     }
   }
@@ -601,6 +602,7 @@ export async function syncHistory(ctx, store) {
   let error = "";
   let retryAfter = 0; // > 0: stopped by the rate limit
   let more = false; // stopped at the per-run cap with tickets left
+  let transient = false; // network/timeout failure: the caller retries the batch
   try {
     outer: for (let page = 1; page <= 10; page++) {
       const tickets = await freshdesk(
@@ -645,8 +647,9 @@ export async function syncHistory(ctx, store) {
   } catch (err) {
     if (err instanceof FreshdeskRateLimit) retryAfter = err.retryAfter || 60;
     else {
-      error = `Sync failed: ${err?.message || err}`;
-      logger.warn({ err, storeId: store.id }, "crm history sync failed");
+      error = `Sync failed: ${errorText(err)}`;
+      transient = isTransient(err);
+      logger.warn({ err, storeId: store.id, transient }, "crm history sync failed");
     }
   }
   // Caught up: drop tickets that have rolled out of the 12-month window.
@@ -662,12 +665,14 @@ export async function syncHistory(ctx, store) {
     historyCursor: cursor.toISOString(),
     lastSyncAt: new Date().toISOString(),
     lastSyncError: error,
+    lastSyncErrorAt: error ? new Date().toISOString() : "",
+    syncRetryAt: "",
     lastSyncSaved: saved,
     syncPausedUntil: retryAfter ? new Date(Date.now() + (retryAfter + 5) * 1000).toISOString() : "",
     historyCount: (state.historyCount || 0) + saved, // refreshed exactly below
   });
   await refreshHistoryCount(api, store);
-  return { examined, saved, error, retryAfter, more };
+  return { examined, saved, error, transient, retryAfter, more };
 }
 
 // ─────────────────────────── archived-ticket backfill ───────────────────────────
@@ -689,6 +694,7 @@ export async function syncArchived(ctx, store) {
   let saved = 0;
   let retryAfter = 0;
   let error = "";
+  let transient = false;
   try {
     if (!a.nextId) {
       const [oldest] = (await freshdesk(store, "GET", `/tickets?updated_since=${encodeURIComponent(windowStart.toISOString())}&order_by=updated_at&order_type=asc&per_page=1`)) || [];
@@ -731,8 +737,9 @@ export async function syncArchived(ctx, store) {
   } catch (err) {
     if (err instanceof FreshdeskRateLimit) retryAfter = err.retryAfter || 60;
     else {
-      error = `Archived-ticket sync failed: ${err?.message || err}`;
-      logger.warn({ err, storeId: store.id }, "crm archived history sync failed");
+      error = `Archived-ticket sync failed: ${errorText(err)}`;
+      transient = isTransient(err);
+      logger.warn({ err, storeId: store.id, transient }, "crm archived history sync failed");
     }
   }
   if (a.done && !a.doneAt) a.doneAt = new Date().toISOString();
@@ -740,11 +747,13 @@ export async function syncArchived(ctx, store) {
     archive: a,
     lastSyncAt: new Date().toISOString(),
     lastSyncError: error,
+    lastSyncErrorAt: error ? new Date().toISOString() : "",
+    syncRetryAt: "",
     lastSyncSaved: (store.crmState?.lastSyncSaved || 0) + saved,
     syncPausedUntil: retryAfter ? new Date(Date.now() + (retryAfter + 5) * 1000).toISOString() : "",
   });
   if (saved) await refreshHistoryCount(api, store);
-  return { archive: true, probed, saved, error, retryAfter, more: !a.done && !retryAfter && !error };
+  return { archive: true, probed, saved, error, transient, retryAfter, more: !a.done && !retryAfter && !error };
 }
 
 // Sync ONE ticket now, any status. Human public replies only (bot replies excluded by conversation id).

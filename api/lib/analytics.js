@@ -1,3 +1,4 @@
+import { errorText, retrying, withTimeout } from "./guard";
 import { ASSISTED_WINDOW_DAYS, ANALYTICS_MAX_DAYS, SUPPORT_TOPIC_LABELS, modelPrice, questionKey } from "./defaults";
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -31,14 +32,32 @@ export async function syncStoreOrders({ api, connections, logger }, store) {
   if (firstSite) since = Math.min(since, Date.now() - SITE_BACKFILL_DAYS * DAY);
   // A day of overlap catches orders that were still Incomplete on the previous run.
   const readFrom = startOfDay(since - DAY);
-  const bc = await connections.bigcommerce.forStoreHash(store.storeHash);
+  const bc = await withTimeout(() => connections.bigcommerce.forStoreHash(store.storeHash), "bigcommerce connection");
 
   const orders = [];
   let truncated = true;
   for (let page = 1; page <= MAX_ORDER_PAGES; page++) {
-    const rows = await bc.v2.get("/orders", {
-      query: { min_date_created: new Date(readFrom).toISOString(), sort: "date_created:asc", limit: PAGE, page },
-    });
+    // Each page has a time limit and is retried on a network hang/5xx; a 401/403
+    // (token revoked or missing the Orders scope) is recorded on the store instead.
+    let rows;
+    try {
+      rows = await retrying(
+        () => bc.v2.get("/orders", {
+          query: { min_date_created: new Date(readFrom).toISOString(), sort: "date_created:asc", limit: PAGE, page },
+        }),
+        { label: `GET /orders page ${page}`, ms: 60_000, logger }
+      );
+    } catch (err) {
+      if (isAuthError(err)) {
+        const ordersSyncError = "BigCommerce rejected the app's access token (401/403) when reading orders — reinstall the app or re-approve its Orders (read-only) scope in the BigCommerce control panel.";
+        const analyticsState = { ...state, ordersSyncError, ordersSyncErrorAt: new Date().toISOString() };
+        await api.internal.bigcommerce.store.update(store.id, { analyticsState });
+        store.analyticsState = analyticsState;
+        logger?.warn({ storeId: store.id, storeHash: store.storeHash, reason: errorText(err) }, "order sync: BigCommerce token rejected; orders aren't credited to chats until it's fixed");
+        return { error: ordersSyncError };
+      }
+      throw err;
+    }
     const list = Array.isArray(rows) ? rows : [];
     orders.push(...list);
     if (list.length < PAGE) { truncated = false; break; }
@@ -63,12 +82,18 @@ export async function syncStoreOrders({ api, connections, logger }, store) {
     ordersSyncedAt: new Date().toISOString(),
     siteDaily,
     siteFrom: firstSite ? dayKey(readFrom) : state.siteFrom,
+    ordersSyncError: "",
   };
   await api.internal.bigcommerce.store.update(store.id, { analyticsState });
   store.analyticsState = analyticsState;
 
   logger?.info({ storeId: store.id, orders: orders.length, direct, assisted }, "order attribution synced");
   return { orders: orders.length, direct, assisted };
+}
+
+function isAuthError(err) {
+  const status = Number(err?.status || err?.statusCode || err?.response?.status);
+  return status === 401 || status === 403 || /\b(401|403)\b|unauthori[sz]ed|forbidden/i.test(String(err?.message || ""));
 }
 
 // Overwrite the per-day site totals for every complete day read: from `readFrom`
