@@ -461,7 +461,9 @@ export async function searchAgentAnswers(api, store, text, { max = 3, maxRows = 
   return scored
     .sort((a, b) => b.score - a.score || new Date(b.r.ticketUpdatedAt) - new Date(a.r.ticketUpdatedAt))
     .slice(0, max)
-    .map((x) => x.r);
+    .map((x) => x.r)
+    // The prompt lists the best matches newest first, so the bot can tell which answer is current.
+    .sort((a, b) => new Date(b.ticketUpdatedAt || 0) - new Date(a.ticketUpdatedAt || 0));
 }
 
 // Corrections come from collectFeedback, which only keeps replies written by people.

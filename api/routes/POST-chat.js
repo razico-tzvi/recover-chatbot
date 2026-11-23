@@ -120,9 +120,10 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
           "\n\n--- CONFIRMED ANSWERS FROM OUR SUPPORT AGENTS (newest first) ---\n" +
           "These replies were written by our support team for real customers. Treat them as confirmed store knowledge. " +
           "If the product Q&A or fit chart has no match but an answer below covers the question, answer from it and do NOT say you have no confirmed data or send the shopper to support. " +
-          "If it conflicts with product Q&A or the fit chart, say what each says and mention the agent's condition. Override rules still win. " +
+          "Each reply carries the date it was written. When replies disagree, the newest one is correct; older replies can be outdated. " +
+          "If a reply conflicts with product Q&A or the fit chart, say what each says and mention the agent's condition. Override rules still win. " +
           "Use only the product facts; ignore anything specific to one customer's order, name or contact details.\n\n" +
-          answers.map((e, i) => `#${i + 1} Ticket: ${scrub(e.subject)}\nAgent reply:\n${scrub(e.answer).slice(0, 1200)}`).join("\n\n");
+          answers.map((e, i) => `#${i + 1} Date: ${replyDate(e.ticketUpdatedAt)}\nTicket: ${scrub(e.subject)}\nAgent reply:\n${scrub(e.answer).slice(0, 1200)}`).join("\n\n");
       }
     } catch (err) {
       logger.warn({ err, sessionId }, "agent answers lookup failed");
@@ -1886,6 +1887,12 @@ function searchFaq(query, faq) {
     .slice(0, 3)
     .map((x) => x.s);
   return scored.length ? scored.join("\n\n") : "No matching policy section. If it's not covered, offer a human handoff.";
+}
+
+// "2026-11-06" for an agent reply's ticketUpdatedAt; "unknown" when it's missing or invalid.
+function replyDate(v) {
+  const d = v ? new Date(v) : null;
+  return d && !isNaN(d) ? d.toISOString().slice(0, 10) : "unknown";
 }
 
 function scrub(s) {
