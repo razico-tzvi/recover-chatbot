@@ -18,6 +18,7 @@ type Source = {
 };
 
 const SOURCES: Source[] = [
+  { id: "overrides", name: "Override rules", kind: "Takes priority over everything else", field: "overrideRules" },
   { id: "guidelines", name: "General guidelines", kind: "System prompt", field: "systemPrompt" },
   { id: "faq", name: "Store FAQ & policies", kind: "One ## heading per topic", field: "faq" },
   { id: "catalog", name: "Product catalog", kind: "BigCommerce, read live by the bot's tools" },

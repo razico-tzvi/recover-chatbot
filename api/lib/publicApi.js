@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "crypto";
 import {
   API_SCOPES, API_ACCESS, API_CONTEXT_SOURCES, API_WRITABLE_SETTINGS, API_CONTEXT_MAX_CHARS, PLAYBOOK_MAX_CHARS, FEATURES, ORDER_FIELDS,
-  DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS, DEFAULT_INCENTIVE_INSTRUCTIONS,
+  DEFAULT_OVERRIDE_RULES, DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS, DEFAULT_INCENTIVE_INSTRUCTIONS,
   resolveBranding, resolveFeatures, resolveSafeguards, resolveCrm, resolveLearning,
 } from "./defaults";
 import { publishPlaybook, deactivate } from "./learning";
@@ -320,6 +320,7 @@ export const safetyOut = (e) => ({
 const block = (value, fallback) => (value && String(value).trim()) || fallback;
 
 export const contextOut = (store) => ({
+  overrides: { content: block(store.overrideRules, DEFAULT_OVERRIDE_RULES), isDefault: !String(store.overrideRules || "").trim() },
   guidelines: { content: block(store.systemPrompt, DEFAULT_GUIDELINES), isDefault: !String(store.systemPrompt || "").trim() },
   faq: { content: block(store.faq, DEFAULT_FAQ), isDefault: !String(store.faq || "").trim() },
   voiceTone: { content: block(store.voiceTone, DEFAULT_VOICE_TONE), isDefault: !String(store.voiceTone || "").trim() },

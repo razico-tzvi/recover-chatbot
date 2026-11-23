@@ -139,8 +139,13 @@ function widgetSource() {
   function renderText(text) {
     var s = String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
     var links = [];
-    // Placeholders use \u0000 so plain numbers in the reply (e.g. "9mm & 357") aren't mistaken for link indexes.
     function stash(label, url) { return "\u0000" + (links.push('<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + label + "</a>") - 1) + "\u0000"; }
+    // Images BEFORE links — otherwise the link regex eats the [alt](url) inside ![alt](url)
+    s = s.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, function (m, alt, url) {
+      return /^(https?:\/\/|\/)/.test(url)
+        ? "\u0000" + (links.push('<img src="' + url + '" alt="' + alt + '" style="max-width:100%;border-radius:8px;margin:8px 0;display:block;">') - 1) + "\u0000"
+        : m;
+    });
     s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (m, label, url) { return /^(https?:\/\/|\/)/.test(url) ? stash(label, url) : m; });
     s = s.replace(/(https?:\/\/[^\s<]+)/g, function (url) { return stash(url, url); });
     s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
@@ -318,25 +323,6 @@ function widgetSource() {
   }
   updateVoiceBtn();
 
-  // ---- page API: lets the theme open the chat from its own buttons ----
-  // window.RecoverChat.open(question?, { productId? }) opens the panel and, given a question, sends it.
-  // window.RecoverChat.hideLauncher() removes the floating bubble and callout when the page has its own entry points.
-  // "recoverchat:ready" fires on document once this exists, for pages whose scripts ran first.
-  var ctxProductId = null;
-  window.RecoverChat = {
-    open: function (question, opts) {
-      if (opts && Number(opts.productId) > 0) ctxProductId = Math.floor(Number(opts.productId));
-      if (!open) toggle();
-      var q = String(question || "").trim();
-      if (q) { inputEl.value = q; updateVoiceBtn(); send(); }
-    },
-    hideLauncher: function () {
-      dismissCallout();
-      launcher.style.display = "none";
-    },
-  };
-  try { document.dispatchEvent(new CustomEvent("recoverchat:ready")); } catch (e) {}
-
   // ---- UI helpers ----
   function toggle() {
     open = !open;
@@ -471,7 +457,7 @@ function widgetSource() {
   function pageContext() {
     var ctx = { url: location.href, title: document.title };
     var el = document.querySelector('[data-cart-item-add] input[name="product_id"]') || document.querySelector('input[name="product_id"]');
-    var id = (el && parseInt(el.value, 10)) || ctxProductId;
+    var id = el && parseInt(el.value, 10);
     if (id) ctx.productId = id;
     return ctx;
   }

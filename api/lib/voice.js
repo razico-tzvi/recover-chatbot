@@ -1,3 +1,6 @@
+// LEARNING RULE (Tzvi, 19 Nov 2026): the bot learns only from the website and from replies
+// written by people on our support team in Freshdesk. It never learns from its own replies.
+// This file reads only crmHistory, which api/lib/crm.js keeps free of the bot's replies.
 // Voice & tone (context source 8) generated from the agent replies the Freshdesk
 // history sync stored in crmHistory. Server-only.
 //

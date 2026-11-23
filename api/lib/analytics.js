@@ -157,7 +157,12 @@ const MAX_SESSIONS = 20000;
 
 export async function findAll(model, filter, select) {
   const rows = [];
-  let page = await model.findMany({ filter, select, first: PAGE });
+  let page = await model.findMany({
+    filter,
+    sort: { id: "Ascending" },
+    select: { ...select, id: true }, // the cursor is built from id
+    first: PAGE,
+  });
   for (;;) {
     rows.push(...page);
     if (!page.hasNextPage || rows.length >= MAX_SESSIONS) break;

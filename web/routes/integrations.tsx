@@ -2,14 +2,17 @@ import { useState } from "react";
 import { api } from "../api";
 import { CLAUDE_MODELS, FEATURES, resolveCrm } from "../../api/lib/defaults";
 import { freshdeskHost } from "../../api/lib/integrations";
-import { hasSecret, useSettings, type Draft } from "../lib/settings";
+import { hasSecret, useSettings,parsePcs,parseUgc, type Draft } from "../lib/settings";
 import { Alert, Btn, Field, Loading, Modal, Tag } from "../components/ui";
 import anthropicLogo from "../assets/integrations/anthropic.svg";
 import bigcommerceLogo from "../assets/integrations/bigcommerce.svg";
 import freshdeskLogo from "../assets/integrations/freshdesk.svg";
 import shipstationLogo from "../assets/integrations/shipstation.png";
+import configuratorLogo from "../assets/integrations/configurator.png";
+import productTabLogo from "../assets/integrations/product-tabs.png";
+import ugcLogo from "../assets/integrations/ugc.png";
 
-type Id = "anthropic" | "bigcommerce" | "freshdesk" | "shipstation";
+type Id = "anthropic" | "bigcommerce" | "freshdesk" | "shipstation" | "configurator" | "productcontent" | "ugc";
 type TestResult = { ok: boolean; message: string; missing?: string[] };
 
 const IS_DEV = process.env.GADGET_PUBLIC_APP_ENV === "development";
@@ -20,6 +23,9 @@ const TILES: { id: Id; name: string; logo: string; bg: string; powers: string }[
   { id: "bigcommerce", name: "BigCommerce", logo: bigcommerceLogo, bg: "#FFFFFF", powers: "Installed app · catalog, order lookup, carts & checkout." },
   { id: "freshdesk", name: "Freshdesk", logo: freshdeskLogo, bg: "#FFFFFF", powers: "The connected CRM: ticket history, ticket drafting, handoff tickets." },
   { id: "shipstation", name: "ShipStation", logo: shipstationLogo, bg: "#FFFFFF", powers: "Carrier-level tracking events and delivery estimates for order lookups." },
+  { id: "configurator", name: "Product Configurator", logo: configuratorLogo, bg: "#EEF2FF", powers: "Reads kit steps, choices, fitment and price deltas from the configurator app." },
+  { id: "productcontent", name: "Product Tabs", logo: productTabLogo, bg: "#F0FDF4", powers: "Product tabs, fit charts and Q&A from your product content API." },
+  { id: "ugc", name: "Customer Photos & Videos", logo: productTabLogo, bg: "#FFF7ED", powers: "Approved customer photos and videos (UGC) for product pages." },
 ];
 
 // "5 min ago" style; the exact time goes in a tooltip.
@@ -76,12 +82,18 @@ export const IntegrationsPage = () => {
     bigcommerce: true,
     freshdesk: !!freshdeskHost(store?.freshdeskDomain) && hasSecret(store, "freshdeskApiKey"),
     shipstation: hasSecret(store, "shipstationApiKey"),
+    configurator: !!store?.configuratorHost,
+    productcontent: !!parsePcs(store).enabled && !!parsePcs(store).endpointUrl && !!parsePcs(store).apiKey,
+    ugc: !!parseUgc(store).enabled && !!parseUgc(store).endpointUrl && !!parseUgc(store).apiKey,
   };
   const connected: Record<Id, boolean> = {
     anthropic: draft.llmProvider === "anthropic" ? !!draft.llmModel && (hasSecret(store, "llmApiKey") || !!draft.llmApiKey) : !!draft.llmBaseUrl && !!draft.llmModel,
     bigcommerce: true,
     freshdesk: !!freshdeskHost(draft.freshdeskDomain) && (hasSecret(store, "freshdeskApiKey") || !!draft.freshdeskApiKey),
     shipstation: hasSecret(store, "shipstationApiKey") || !!draft.shipstationApiKey,
+    configurator: !!draft.configuratorHost.trim(),
+    productcontent: draft.productContentEnabled && !!draft.productContentUrl.trim() && (!!draft.productContentKey.trim() || !!parsePcs(store).apiKey),
+    ugc: draft.ugcEnabled && !!draft.ugcUrl.trim() && (!!draft.ugcKey.trim() || !!parseUgc(store).apiKey),
   };
   const unsaved: Record<Id, boolean> = {
     anthropic: !!draft.llmApiKey.trim() || draft.llmProvider !== savedProvider || draft.llmModel.trim() !== (store?.llmModel ?? "")
@@ -90,6 +102,13 @@ export const IntegrationsPage = () => {
     bigcommerce: false,
     freshdesk: !!draft.freshdeskApiKey.trim() || draft.freshdeskDomain.trim() !== (store?.freshdeskDomain ?? ""),
     shipstation: !!draft.shipstationApiKey.trim() || !!draft.shipstationApiSecret.trim(),
+    configurator: draft.configuratorHost.trim() !== (store?.configuratorHost ?? ""),
+    productcontent: !!draft.productContentKey.trim()
+      || draft.productContentUrl.trim() !== (parsePcs(store).endpointUrl ?? "")
+      || draft.productContentEnabled !== !!parsePcs(store).enabled,
+    ugc: !!draft.ugcKey.trim()
+      || draft.ugcUrl.trim() !== (parseUgc(store).endpointUrl ?? "")
+      || draft.ugcEnabled !== !!parseUgc(store).enabled,
   };
 
   const status = (id: Id): { text: string; tone: "good" | "warn" | "crit" } => {
@@ -213,7 +232,12 @@ function IntegrationModal({ tile, badge, unsaved, onClose, result, onResult }: {
       onClose={onClose}
       footer={
         <>
-          <Btn loading={testing} onClick={test}>{id === "bigcommerce" ? "Review permissions" : "Test connection"}</Btn>
+          {/* <Btn loading={testing} onClick={test}>{id === "bigcommerce" ? "Review permissions" : "Test connection"}</Btn> */}
+          {id !== "configurator" && id !== "productcontent" && id !== "ugc" &&(
+            <Btn loading={testing} onClick={test}>
+              {id === "bigcommerce" ? "Review permissions" : "Test connection"}
+            </Btn>
+          )}
           {id !== "bigcommerce" && <Btn primary loading={saving} disabled={!unsaved} onClick={saveAndClose}>Save</Btn>}
         </>
       }
@@ -291,7 +315,101 @@ function IntegrationModal({ tile, badge, unsaved, onClose, result, onResult }: {
           <p className="hint">Get the key in ShipStation under Settings › Account › API Settings, paste it once, then test. Tracking events in order lookup arrive in a later release.</p>
         </>
       )}
-
+      {id === "configurator" && (
+        <>
+          <Field label="Configurator host" htmlFor="i-cfg" hint="The Gadget app domain serving your configurator API.">
+            <input
+              type="text"
+              id="i-cfg"
+              value={d.configuratorHost}
+              placeholder="e.g. stage-product-configurator.gadget.app"
+              onChange={(e) => set("configuratorHost", e.target.value)}
+            />
+          </Field>
+          <p className="hint">
+            Leave blank to use the default (<code>product-configurator.gadget.app</code>).
+            For staging, enter your stage configurator host. The bot uses this to fetch
+            product steps, choices, fitment data and price deltas.
+          </p>
+        </>
+      )}
+      {id === "productcontent" && (
+        <>
+          <div className="grid2">
+            <Field label="Endpoint URL" htmlFor="i-pc-url" hint="Your product content API (e.g. from the Product Tabs app).">
+              <input
+                type="text"
+                id="i-pc-url"
+                value={d.productContentUrl}
+                placeholder="https://your-tabs-app.gadget.app/external/product-content"
+                onChange={(e) => set("productContentUrl", e.target.value)}
+              />
+            </Field>
+            <Field label="API key" htmlFor="i-pc-key" hint="The key configured in your product content app.">
+              <input
+                type="password"
+                id="i-pc-key"
+                autoComplete="off"
+                value={d.productContentKey}
+                placeholder={parsePcs(store).apiKey ? "•••••••• (leave blank to keep current)" : "Paste it here"}
+                onChange={(e) => set("productContentKey", e.target.value)}
+              />
+            </Field>
+          </div>
+          <label className="row" style={{ gap: 8, marginTop: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={d.productContentEnabled}
+              onChange={(e) => set("productContentEnabled", e.target.checked)}
+            />
+            <span>Enabled</span>
+          </label>
+          <p className="hint">
+            When enabled, the bot fetches product tabs (fit charts, specs, installation) and
+            answered Q&A from this endpoint for every product detail lookup. The endpoint must
+            accept <code>?productId=</code> and authenticate via the <code>X-API-Key</code> header.
+          </p>
+        </>
+      )}
+      
+      {id === "ugc" && (
+        <>
+          <div className="grid2">
+            <Field label="Endpoint URL" htmlFor="i-ugc-url" hint="Your UGC app's API endpoint.">
+              <input
+                type="text"
+                id="i-ugc-url"
+                value={d.ugcUrl}
+                placeholder="https://your-ugc-app.gadget.app/external/ugc"
+                onChange={(e) => set("ugcUrl", e.target.value)}
+              />
+            </Field>
+            <Field label="API key" htmlFor="i-ugc-key" hint="The key configured in your UGC app.">
+              <input
+                type="password"
+                id="i-ugc-key"
+                autoComplete="off"
+                value={d.ugcKey}
+                placeholder={parseUgc(store).apiKey ? "•••••••• (leave blank to keep current)" : "Paste it here"}
+                onChange={(e) => set("ugcKey", e.target.value)}
+              />
+            </Field>
+          </div>
+          <label className="row" style={{ gap: 8, marginTop: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={d.ugcEnabled}
+              onChange={(e) => set("ugcEnabled", e.target.checked)}
+            />
+            <span>Enabled</span>
+          </label>
+          <p className="hint">
+            When enabled, the bot can search and share approved customer photos and videos
+            for any product. The endpoint must accept <code>?productId=</code> and return
+            <code>{"{ media: [{ type, url, caption, tags }] }"}</code>.
+          </p>
+        </>
+      )}
       {syncRows(id, store).length > 0 && (
         <div className="kv sync">
           <b className="label">Last sync</b>

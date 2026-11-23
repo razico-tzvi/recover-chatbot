@@ -65,6 +65,9 @@ export const params = {
 };
 
 export const options: ActionOptions = {
-  triggers: { api: true, scheduler: [{ cron: "0 7 * * *" }] },
+  triggers: {
+    api: true,
+    scheduler: [{ cron: "0 7 * * *" }],
+  },
   timeoutMS: 900000,
 };

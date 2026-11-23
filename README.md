@@ -1,3 +1,15 @@
+## Learning rule
+
+The bot learns only from the website (product pages, fit charts, Q&A, configurator, photos)
+and from replies written by people on our support team in Freshdesk.
+It never learns from its own replies.
+
+How it is enforced (api/lib/crm.js):
+- Every public reply the app posts to Freshdesk saves its conversation id in the `botReply` model.
+- Ticket history, Voice & tone seeding and the corrections examples leave those conversations out,
+  whatever the ticket's tags. Tickets tagged ai-answered or ai-blocked are skipped as well.
+- Tags are best effort and are not relied on.
+- If you add a new place that posts a public reply, use postPublicReply().
 # BigCommerce AI Customer Chatbot
 
 An AI shopping assistant that chats with customers on behalf of a BigCommerce

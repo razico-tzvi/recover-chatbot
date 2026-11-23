@@ -9,10 +9,19 @@ import { endpoint, listParams, createdFilter, page, sessionOut } from "../../lib
 export default endpoint("conversations", async ({ request, api, store }) => {
   const q = request.query || {};
   const p = listParams(q);
-  const filter = { ...createdFilter(store.id, p), messageCount: { greaterThan: 0 } };
+  
+  // Ensure store.id is string matched and filtered by active updatedAt timestamp
+  const filter = { 
+    storeId: { equals: String(store.id) },
+    messageCount: { greaterThan: 0 } 
+  };
+  
+  if (p.since) filter.updatedAt = { gte: p.since };
+  if (p.until) filter.updatedAt = { lte: p.until };
   if (q.needsHuman === "true") filter.needsHuman = { equals: true };
   if (q.flagged === "true") filter.flagged = { equals: true };
   if (q.converted === "true") filter.conversion = { isSet: true };
+  
   const { data, nextCursor } = await page(api.internal.chatSession, filter, p.limit);
   return { data: data.map(sessionOut), nextCursor };
 });

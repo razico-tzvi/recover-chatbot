@@ -16,6 +16,7 @@ export const schema: GadgetModel = {
       storageKey: "store-anthropicModels",
     },
     botName: { type: "string", storageKey: "store-botName" },
+    configuratorHost: { type: "string", storageKey: "3q9aAyc0U6Pk" },
     crmSettings: { type: "json", storageKey: "store-crmSettings" },
     crmState: { type: "json", storageKey: "store-crmState" },
     disclaimer: { type: "string", storageKey: "store-disclaimer" },
@@ -63,6 +64,11 @@ export const schema: GadgetModel = {
     llmBaseUrl: { type: "string", storageKey: "store-llmBaseUrl" },
     llmModel: { type: "string", storageKey: "store-llmModel" },
     llmProvider: { type: "string", storageKey: "store-llmProvider" },
+    overrideRules: { type: "string", storageKey: "2TiPwvpCY2Ja" },
+    productContentSource: {
+      type: "string",
+      storageKey: "AO9aUTKGe_Qa",
+    },
     safeguards: { type: "json", storageKey: "store-safeguards" },
     safeguardsInstructions: {
       type: "string",
@@ -88,6 +94,7 @@ export const schema: GadgetModel = {
       type: "string",
       storageKey: "store-systemPrompt",
     },
+    ugcSource: { type: "string", storageKey: "TPaW3eiH-MOU" },
     visionEnabled: {
       type: "boolean",
       storageKey: "store-visionEnabled",

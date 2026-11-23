@@ -2,10 +2,26 @@ import { useAction, useFindFirst } from "@gadgetinc/react";
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { api } from "../api";
 import {
-  DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_INCENTIVE_INSTRUCTIONS, DEFAULT_SAFEGUARDS_INSTRUCTIONS, DEFAULT_VOICE_TONE,
+  DEFAULT_OVERRIDE_RULES, DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_INCENTIVE_INSTRUCTIONS, DEFAULT_SAFEGUARDS_INSTRUCTIONS, DEFAULT_VOICE_TONE,
   resolveBranding, resolveFeatures, resolveSafeguards, resolveCrm, DEFAULT_SAFEGUARDS, DEFAULT_FEATURES,
 } from "../../api/lib/defaults";
 
+
+// Product content source is stored as a JSON object (or string) on the store.
+export function parsePcs(store: any) {
+  let pcs = store?.productContentSource;
+  if (typeof pcs === "string") {
+    try { pcs = JSON.parse(pcs); } catch { pcs = null; }
+  }
+  return pcs || {};
+}
+export function parseUgc(store: any) {
+  let ugc = store?.ugcSource;
+  if (typeof ugc === "string") {
+    try { ugc = JSON.parse(ugc); } catch { ugc = null; }
+  }
+  return ugc || {};
+}
 // CRM settings as edited in the form: tag and keyword lists are comma-separated text.
 export type CrmDraft = {
   mode: "off" | "learning" | "live";
@@ -49,6 +65,7 @@ function crmSettingsFrom(store: any, d: CrmDraft) {
 // Context blocks: a block left equal to its default is saved as "" so the
 // server keeps using the (possibly updated) built-in default.
 export const CONTEXT_DEFAULTS = {
+  overrideRules: DEFAULT_OVERRIDE_RULES,
   systemPrompt: DEFAULT_GUIDELINES,
   faq: DEFAULT_FAQ,
   incentiveInstructions: DEFAULT_INCENTIVE_INSTRUCTIONS,
@@ -78,6 +95,13 @@ export type Draft = {
   anthropicModels: { crm: string; analysis: string };
   freshdeskDomain: string;
   crm: CrmDraft;
+  configuratorHost: string;
+  productContentUrl: string;
+  productContentKey: string;
+  productContentEnabled: boolean;
+  ugcUrl: string;
+  ugcKey: string;
+  ugcEnabled: boolean;
 } & Record<ContextKey, string> & Record<SecretKey, string>;
 
 function draftFrom(store: any): Draft {
@@ -102,6 +126,13 @@ function draftFrom(store: any): Draft {
     llmModel: store?.llmModel ?? "",
     anthropicModels: { crm: store?.anthropicModels?.crm ?? "", analysis: store?.anthropicModels?.analysis ?? "" },
     freshdeskDomain: store?.freshdeskDomain ?? "",
+    configuratorHost: store?.configuratorHost ?? "",
+    productContentUrl: parsePcs(store).endpointUrl ?? "",
+    productContentKey: "",
+    productContentEnabled: !!parsePcs(store).enabled,
+    ugcUrl: parseUgc(store).endpointUrl ?? "",
+    ugcKey: "",
+    ugcEnabled: !!parseUgc(store).enabled,
     crm: crmDraftFrom(store),
     llmApiKey: "",
     freshdeskApiKey: "",
@@ -129,7 +160,18 @@ function toUpdate(store: any, d: Draft) {
     llmModel: d.llmModel.trim(),
     anthropicModels: d.anthropicModels,
     freshdeskDomain: d.freshdeskDomain.trim(),
+    configuratorHost: d.configuratorHost.trim(),
     crmSettings: crmSettingsFrom(store, d.crm),
+    productContentSource: JSON.stringify({
+      enabled: d.productContentEnabled,
+      endpointUrl: d.productContentUrl,
+      apiKey: d.productContentKey || parsePcs(store).apiKey,
+    }),
+    ugcSource: JSON.stringify({
+      enabled: d.ugcEnabled,
+      endpointUrl: d.ugcUrl,
+      apiKey: d.ugcKey || parseUgc(store).apiKey,
+    }),
   };
   for (const k of Object.keys(CONTEXT_DEFAULTS) as ContextKey[]) {
     const v = d[k].trim();

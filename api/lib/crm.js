@@ -1,3 +1,26 @@
+// ══════════════════════════════════════════════════════════════════════════════
+// LEARNING RULE (Tzvi, 19 Nov 2026) — DO NOT BREAK
+//
+//   The bot learns ONLY from:
+//     1. the website (product pages, fit charts, Q&A, configurator, photos), and
+//     2. replies written by people on our support team in Freshdesk.
+//   It NEVER learns from its own replies.
+//
+// How this is enforced (tags are NOT the source of truth — they are best effort):
+//   • Every public reply this app posts to Freshdesk goes through postPublicReply(),
+//     which saves the Freshdesk conversation id in the app's own database
+//     (model botReply). That is the only way this file posts a public reply.
+//   • syncHistory, the archived backfill (syncArchived) and collectFeedback leave
+//     those conversations out, whatever the ticket's tags. Ticket history
+//     (crmHistory), Voice & tone (voice.js reads crmHistory) and the corrections
+//     examples (recentCorrections) are all fed from those, so they inherit it.
+//   • Tickets tagged ai-answered or ai-blocked are skipped as well, and anything
+//     already stored for them is removed.
+//   • purgeLegacyBotHistory() removes what got in before this rule was enforced.
+// If you add a new place that posts a public reply, use postPublicReply().
+// If you add a new place that reads Freshdesk replies for learning, use humanReplies().
+// ══════════════════════════════════════════════════════════════════════════════
+//
 // CRM ticket answering (Freshdesk). Server-only.
 //
 // pollStore     — every 5 min: new open tickets created after the mode was turned
@@ -9,7 +32,6 @@
 //                 a similarity score; edited drafts are shown to later drafts.
 // syncHistory   — nightly: resolved/closed tickets → agent public replies only,
 //                 used as reference answers and to seed Voice & tone (voice.js).
-
 import {
   CRM_GUARDRAILS, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
   resolveBranding, resolveCrm, resolveSignature, matchBlocklist, detectHumanRequest,
@@ -32,13 +54,111 @@ const HISTORY_BUDGET_SHARE = 0.4;
 const MAX_ARCHIVE_PROBES_PER_RUN = 150;
 const ARCHIVE_TOP_MARGIN = 200; // ids above the oldest listed ticket that may already be archived
 const ARCHIVE_MISS_LIMIT = 1000; // this many missing ids in a row = start of the helpdesk's ids
-
 const block = (v, fallback) => (v && String(v).trim()) || fallback;
 const clip = (s, n) => String(s || "").slice(0, n);
 const isAgentReply = (c) => c && c.incoming === false && c.private === false;
 
-// ─────────────────────────── stores & state ───────────────────────────
+// ─────────────────────────── the learning rule (see top of file) ───────────────────────────
+// Freshdesk conversation ids of the public replies this app posted on a ticket
+// (botReply model). `unknown` = at least one was recorded without an id (legacy
+// purge, or Freshdesk didn't return one): then no agent reply on that ticket can be
+// told apart from the bot's, so none of them counts.
+export async function botRepliesOn(api, store, ticketId) {
+  const rows = await api.internal.botReply.findMany({
+    filter: { storeId: { equals: store.id }, ticketId: { equals: ticketId } },
+    select: { conversationId: true },
+    first: 250,
+  });
+  const list = [...rows];
+  return {
+    ids: new Set(list.map((r) => r.conversationId).filter((x) => x != null).map(Number)),
+    unknown: list.some((r) => r.conversationId == null),
+  };
+}
 
+// The ONLY way to get "replies written by our support team" out of a conversation list.
+export function humanReplies(convos, bot) {
+  if (bot.unknown) return [];
+  return (convos || []).filter((c) => isAgentReply(c) && !bot.ids.has(Number(c.id)));
+}
+
+// Tickets the bot answered (ai-answered) or handled with a set response (ai-blocked).
+const isBotTagged = (tags, crm) =>
+  [crm.answeredTag, crm.blockedTag].filter(Boolean).some((x) => tags.includes(String(x).toLowerCase()));
+
+// Never throws: the reply is already public, and a retry would post it twice.
+async function recordBotReply(ctx, store, ticketId, posted, kind) {
+  const conversationId = Number(posted?.id) || null;
+  if (conversationId === null) ctx.logger.error({ ticketId, kind }, "crm: Freshdesk returned no conversation id for the bot's reply; the whole ticket is kept out of learning");
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await ctx.api.internal.botReply.create({ storeId: store.id, ticketId, conversationId, kind });
+      return true;
+    } catch (err) {
+      ctx.logger.error({ err, storeId: store.id, ticketId, conversationId, kind, attempt }, "crm: bot reply could not be recorded");
+      if (attempt < 3) await new Promise((r) => setTimeout(r, 300 * attempt));
+    }
+  }
+  return false;
+}
+
+// Every public reply the app posts goes through here (kind: "reply" | "blocked").
+async function postPublicReply(ctx, store, ticketId, text, kind) {
+  const posted = await freshdesk(store, "POST", `/tickets/${ticketId}/reply`, { body: toHtml(text) });
+  await recordBotReply(ctx, store, ticketId, posted, kind);
+  return posted;
+}
+
+// Tickets (out of `ticketIds`) where the app posted a public reply.
+async function ticketsWithBotReplies(api, store, ticketIds) {
+  const ids = [...new Set(ticketIds.filter((x) => x != null))];
+  if (!ids.length) return new Set();
+  const rows = await api.internal.botReply.findMany({
+    filter: { storeId: { equals: store.id }, ticketId: { in: ids } },
+    select: { ticketId: true },
+    first: 250,
+  });
+  return new Set([...rows].map((r) => r.ticketId));
+}
+
+// One-time (per store) clean-up of what got in before the rule was enforced.
+// crmTicket records what the bot did: action "replied" = a Live answer was posted,
+// action "blocked" with reason "Set response sent." = a Live set response was posted.
+// For those tickets: record a botReply without an id (= the whole ticket stays out
+// of learning) and delete what crmHistory holds for them.
+async function purgeLegacyBotHistory(ctx, store) {
+  const { api, logger } = ctx;
+  let marked = 0;
+  let removed = 0;
+  const filters = [
+    { storeId: { equals: store.id }, action: { equals: "replied" } },
+    { storeId: { equals: store.id }, action: { equals: "blocked" }, reason: { equals: "Set response sent." } },
+  ];
+  for (const filter of filters) {
+    let page = await api.internal.crmTicket.findMany({ filter, sort: [{ id: "Ascending" }], select: { ticketId: true }, first: 250 });
+    for (;;) {
+      for (const r of page) {
+        const [known] = await api.internal.botReply.findMany({ filter: { storeId: { equals: store.id }, ticketId: { equals: r.ticketId } }, select: { id: true }, first: 1 });
+        if (!known) {
+          await api.internal.botReply.create({ storeId: store.id, ticketId: r.ticketId, conversationId: null, kind: "legacy" });
+          marked++;
+        }
+        const h = await findHistory(api, store, r.ticketId);
+        if (h) {
+          await api.internal.crmHistory.delete(h.id);
+          removed++;
+        }
+      }
+      if (!page.hasNextPage) break;
+      page = await page.nextPage();
+    }
+  }
+  if (removed) await refreshHistoryCount(api, store);
+  logger.info({ storeId: store.id, marked, removed }, "crm: removed the bot's own replies from ticket history");
+  return { marked, removed };
+}
+
+// ─────────────────────────── stores & state ───────────────────────────
 export async function storesFor(api, storeId) {
   const filter = storeId ? { id: { equals: String(storeId) } } : undefined;
   return api.internal.bigcommerce.store.findMany({ filter, first: 250 });
@@ -51,7 +171,6 @@ export async function saveState(api, store, patch) {
 }
 
 // ─────────────────────────── polling new tickets ───────────────────────────
-
 export async function pollStore(ctx, store) {
   const { api, logger } = ctx;
   const crm = resolveCrm(store);
@@ -61,7 +180,6 @@ export async function pollStore(ctx, store) {
     await saveState(api, store, { lastPollAt: new Date().toISOString(), lastPollError: "The AI model isn't configured (Integrations › Anthropic)." });
     return { skipped: true };
   }
-
   const state = store.crmState || {};
   const sinceIso = crm.enabledAt || state.since;
   if (!sinceIso) {
@@ -71,7 +189,6 @@ export async function pollStore(ctx, store) {
   }
   const since = new Date(sinceIso);
   let cursor = state.pollCursor && new Date(state.pollCursor) > since ? new Date(state.pollCursor) : since;
-
   let handled = 0;
   let error = "";
   let retryAfter = 0;
@@ -82,13 +199,11 @@ export async function pollStore(ctx, store) {
         `/tickets?updated_since=${encodeURIComponent(cursor.toISOString())}&order_by=updated_at&order_type=asc&per_page=30&page=${page}&include=requester,description`
       );
       if (!tickets?.length) break;
-
       const ids = tickets.map((t) => t.id);
       const seen = new Set(
         (await api.internal.crmTicket.findMany({ filter: { storeId: { equals: store.id }, ticketId: { in: ids } }, select: { ticketId: true }, first: 250 }))
           .map((r) => r.ticketId)
       );
-
       for (const t of tickets) {
         if (handled >= MAX_NEW_PER_RUN) break outer;
         if (!seen.has(t.id) && isCandidate(t, crm, since)) {
@@ -107,7 +222,6 @@ export async function pollStore(ctx, store) {
       logger.warn({ err, storeId: store.id }, "crm poll failed");
     }
   }
-
   await saveState(api, store, {
     pollCursor: cursor.toISOString(),
     lastPollAt: new Date().toISOString(),
@@ -135,11 +249,9 @@ export async function processTicket(ctx, store, crm, cfg, t) {
   const question = clip(t.description_text || stripHtml(t.description), 4000);
   const base = { storeId: store.id, ticketId: t.id, subject, question };
   const record = (values) => api.internal.crmTicket.create({ ...base, ...values });
-
   try {
     const convos = (await freshdesk(store, "GET", `/tickets/${t.id}/conversations?per_page=100`)) || [];
     if (convos.some(isAgentReply)) return record({ action: "skipped", reason: "An agent already replied." });
-
     const askedForHuman = detectHumanRequest(`${subject}\n${question}`);
     const blocked = matchBlocklist(`${subject}\n${question}`, crm.blocklist);
     if (blocked && askedForHuman) {
@@ -153,13 +265,13 @@ export async function processTicket(ctx, store, crm, cfg, t) {
         return record({ action: "blocked", blockedTopic: blocked.topic, reason: "Blocked topic with no set response — left for a human." });
       }
       const text = withSignature(blocked.response, resolveSignature(store));
-      if (crm.mode === "live") await freshdesk(store, "POST", `/tickets/${t.id}/reply`, { body: toHtml(text) });
+      // The public reply's conversation id is saved (postPublicReply) so it is never learned from.
+      if (crm.mode === "live") await postPublicReply(ctx, store, t.id, text, "blocked");
       else await addNote(store, t.id, `Set response for blocked topic “${blocked.topic}”. Not sent to the customer.`, text);
       const row = await record({ action: "blocked", blockedTopic: blocked.topic, draft: blocked.response, confident: true, reason: crm.mode === "live" ? "Set response sent." : "Set response added as a private note.", nextCheckAt: crm.mode === "live" ? null : nextCheck(10 * 60 * 1000) });
       await addTag(ctx, store, t, crm.blockedTag);
       return row;
     }
-
     const d = await draftReply(ctx, store, cfg, { subject, question, name: requesterName(t.requester) });
     const text = withSignature(d.reply, resolveSignature(store));
     if (askedForHuman || d.humanRequested) {
@@ -170,7 +282,8 @@ export async function processTicket(ctx, store, crm, cfg, t) {
       return row;
     }
     if (crm.mode === "live" && d.confident) {
-      await freshdesk(store, "POST", `/tickets/${t.id}/reply`, { body: toHtml(text) });
+      // The public reply's conversation id is saved (postPublicReply) so it is never learned from.
+      await postPublicReply(ctx, store, t.id, text, "reply");
       const row = await record({ action: "replied", draft: d.reply, confident: true, reason: d.reason, model: cfg.model });
       await addTag(ctx, store, t, crm.answeredTag);
       return row;
@@ -198,9 +311,7 @@ export function requesterName(r) {
   if (!name || (local && name.toLowerCase() === local) || name.includes("@")) return "";
   return name;
 }
-
 const nextCheck = (ms) => new Date(Date.now() + ms).toISOString();
-
 async function addNote(store, ticketId, header, text) {
   await freshdesk(store, "POST", `/tickets/${ticketId}/notes`, {
     private: true,
@@ -210,6 +321,7 @@ async function addNote(store, ticketId, header, text) {
 
 // Tags are best effort: a store with required custom ticket fields can reject the update.
 // Several tags go in one PUT (it replaces the ticket's tag list).
+// Learning never depends on them: the bot's replies are tracked by conversation id (botReply).
 async function addTag(ctx, store, t, ...add) {
   try {
     const tags = [...new Set([...(t.tags || []), ...add.filter(Boolean)])];
@@ -222,16 +334,27 @@ async function addTag(ctx, store, t, ...add) {
 }
 
 // ─────────────────────────── drafting ───────────────────────────
-
 export async function draftReply(ctx, store, cfg, { subject, question, name }) {
-  const [examples, corrections] = await Promise.all([similarHistory(ctx.api, store, `${subject} ${question}`), recentCorrections(ctx.api, store)]);
+  const [examples, corrections] = await Promise.all([
+    similarHistory(ctx.api, store, `${subject} ${question}`),
+    recentCorrections(ctx.api, store),
+  ]);
   const parts = [
     `You are ${resolveBranding(store).botName}, writing email replies to customer support tickets for this online store.`,
     CRM_GUARDRAILS,
+  ];
+  // Context source: Override rules (takes priority over everything else)
+  const overrides = String(store?.overrideRules || "").trim();
+  if (overrides) {
+    parts.push(
+      `--- OVERRIDE RULES (CRITICAL: These rules take absolute priority over EVERY OTHER instruction and source below — including Store FAQ & policies, Voice & tone, past agent replies, or refusal instructions. If an override rule conflicts with anything else, the override rule ALWAYS wins) ---\n${overrides}`
+    );
+  }
+  parts.push(
     `--- VOICE & TONE ---\n${block(store.voiceTone, DEFAULT_VOICE_TONE)}`,
     `--- HOW TO WORD REFUSALS ---\n${block(store.safeguardsInstructions, DEFAULT_SAFEGUARDS_INSTRUCTIONS)}`,
-    `--- STORE POLICIES & FAQ ---\n${block(store.faq, DEFAULT_FAQ)}`,
-  ];
+    `--- STORE POLICIES & FAQ ---\n${block(store.faq, DEFAULT_FAQ)}`
+  );
   if (examples.length) {
     parts.push(
       "--- HOW OUR AGENTS ANSWERED SIMILAR PAST TICKETS (reference only; facts about other customers' orders don't apply) ---\n" +
@@ -250,7 +373,6 @@ export async function draftReply(ctx, store, cfg, { subject, question, name }) {
 Set "human_requested" to true only when the customer explicitly asks to deal with a person (a human, a real agent, a manager, "not a bot") rather than an automated reply; then the ticket goes to customer service and your reply is only a draft for them.
 The reply is plain text (no markdown), starts with a greeting${name ? " using the customer's first name" : ""}, answers every question in the ticket, and has NO sign-off or signature — one is added automatically.`
   );
-
   const user = `Ticket subject: ${subject || "(none)"}\n${name ? `Customer name: ${clip(name, 80)}\n` : ""}Customer message:\n"""\n${question || "(empty)"}\n"""`;
   const system = parts.join("\n\n");
   // Output cut off at the token limit is never posted: retry once with more room, else fail (Retry in the admin).
@@ -290,12 +412,13 @@ export function parseDraft(raw) {
 const STOP = new Set("the and for you your with that this have from are was were not but can our any all has had will would could should about what when where which there their them they then than into out how why who its it's i'm i've don't hi hello thanks thank please order orders".split(" "));
 const terms = (s) => [...new Set(String(s || "").toLowerCase().match(/[a-z0-9]{3,}/g) || [])].filter((w) => !STOP.has(w));
 
+// Reads crmHistory only; that table never receives the bot's own replies (see top of file).
 async function similarHistory(api, store, text) {
   const want = terms(text);
   if (!want.length) return [];
   const rows = await api.internal.crmHistory.findMany({
     filter: { storeId: { equals: store.id } },
-    sort: { ticketUpdatedAt: "Descending" },
+    sort: [{ ticketUpdatedAt: "Descending" }, { id: "Descending" }],
     select: { subject: true, answer: true },
     first: 250,
   });
@@ -312,23 +435,54 @@ async function similarHistory(api, store, text) {
     .map((x) => x.r);
 }
 
-async function recentCorrections(api, store) {
-  return api.internal.crmTicket.findMany({
-    filter: { storeId: { equals: store.id }, similarity: { lessThan: APPROVED_SIMILARITY }, finalReply: { isSet: true } },
-    sort: { feedbackAt: "Descending" },
-    select: { subject: true, draft: true, finalReply: true },
-    first: 3,
+export async function searchAgentAnswers(api, store, text, { max = 3, maxRows = 2000 } = {}) {
+  const want = terms(text);
+  if (!want.length) return [];
+  const scored = [];
+  let page = await api.internal.crmHistory.findMany({
+    filter: { storeId: { equals: store.id } },
+    sort: [{ ticketUpdatedAt: "Descending" }, { id: "Descending" }],
+    select: { subject: true, answer: true, ticketUpdatedAt: true },
+    first: 250,
   });
+  let seen = 0;
+  for (;;) {
+    for (const r of page) {
+      const subj = new Set(terms(r.subject));
+      const body = new Set(terms(r.answer));
+      const score = want.reduce((n, w) => n + (subj.has(w) ? 2 : 0) + (body.has(w) ? 1 : 0), 0);
+      if (score >= 3) scored.push({ r, score });
+    }
+    seen += page.length;
+    if (!page.hasNextPage || seen >= maxRows) break;
+    page = await page.nextPage();
+  }
+  return scored
+    .sort((a, b) => b.score - a.score || new Date(b.r.ticketUpdatedAt) - new Date(a.r.ticketUpdatedAt))
+    .slice(0, max)
+    .map((x) => x.r);
+}
+
+// Corrections come from collectFeedback, which only keeps replies written by people.
+// Backstop: a ticket where the app itself posted a public reply is never used as a correction.
+async function recentCorrections(api, store) {
+  const rows = [...(await api.internal.crmTicket.findMany({
+    filter: { storeId: { equals: store.id }, similarity: { lessThan: APPROVED_SIMILARITY }, finalReply: { isSet: true } },
+    sort: [{ feedbackAt: "Descending" }, { id: "Descending" }],
+    select: { subject: true, draft: true, finalReply: true, ticketId: true },
+    first: 10,
+  }))];
+  const botTickets = await ticketsWithBotReplies(api, store, rows.map((r) => r.ticketId));
+  return rows.filter((r) => !botTickets.has(r.ticketId)).slice(0, 3);
 }
 
 // ─────────────────────────── feedback (Learning mode) ───────────────────────────
-
 export async function collectFeedback(ctx, store) {
   const { api, logger } = ctx;
   if (!freshdeskConnected(store)) return { checked: 0 };
   const due = await api.internal.crmTicket.findMany({
     filter: { storeId: { equals: store.id }, nextCheckAt: { lessThanOrEqual: new Date().toISOString() } },
-    sort: { nextCheckAt: "Ascending" },
+    sort: [{ nextCheckAt: "Ascending" }, { id: "Ascending" }],
     first: MAX_FEEDBACK_PER_RUN,
   });
   let captured = 0;
@@ -336,7 +490,9 @@ export async function collectFeedback(ctx, store) {
     try {
       const convos = (await freshdesk(store, "GET", `/tickets/${row.ticketId}/conversations?per_page=100`)) || [];
       const after = new Date(row.createdAt).getTime();
-      const reply = convos.find((c) => isAgentReply(c) && new Date(c.created_at).getTime() > after);
+      // Only replies written by people: the bot's own (botReply) never count as the agent's final reply.
+      const bot = await botRepliesOn(api, store, row.ticketId);
+      const reply = humanReplies(convos, bot).find((c) => new Date(c.created_at).getTime() > after);
       if (reply) {
         const finalReply = clip(reply.body_text || stripHtml(reply.body), 8000);
         await api.internal.crmTicket.update(row.id, {
@@ -374,6 +530,7 @@ export async function crmStats(api, store) {
   const rows = [];
   let page = await api.internal.crmTicket.findMany({
     filter: { storeId: { equals: store.id } },
+    sort: [{ id: "Ascending" }],
     select: { action: true, confident: true, similarity: true, feedbackAt: true },
     first: 250,
   });
@@ -417,11 +574,19 @@ export function similarity(a, b) {
 }
 
 // ─────────────────────────── nightly history sync ───────────────────────────
-
 export async function syncHistory(ctx, store) {
   const { api, logger } = ctx;
   if (!freshdeskConnected(store)) return { skipped: true };
   const crm = resolveCrm(store);
+  // Once per store: remove what got into ticket history before the learning rule was enforced.
+  if (!store.crmState?.botPurgeAt) {
+    try {
+      const purge = await purgeLegacyBotHistory(ctx, store);
+      await saveState(api, store, { botPurgeAt: new Date().toISOString(), botPurge: purge });
+    } catch (err) {
+      logger.warn({ err, storeId: store.id }, "crm: bot history purge failed; it runs again next sync");
+    }
+  }
   const state = store.crmState || {};
   // Rolling 12-month window. historyFrom records where the stored history starts;
   // stores first synced under the old 90-day lookback (no historyFrom, or a later
@@ -436,7 +601,6 @@ export async function syncHistory(ctx, store) {
   let error = "";
   let retryAfter = 0; // > 0: stopped by the rate limit
   let more = false; // stopped at the per-run cap with tickets left
-
   try {
     outer: for (let page = 1; page <= 10; page++) {
       const tickets = await freshdesk(
@@ -447,8 +611,7 @@ export async function syncHistory(ctx, store) {
       for (const t of tickets) {
         if (examined >= MAX_HISTORY_PER_RUN) { more = true; break outer; }
         const tags = (t.tags || []).map((x) => String(x).toLowerCase());
-        // Live-mode AI replies are posted as an agent; keep them out of "how agents answer".
-        if ([STATUS_RESOLVED, STATUS_CLOSED].includes(t.status) && !tags.includes(crm.answeredTag)) {
+        if ([STATUS_RESOLVED, STATUS_CLOSED].includes(t.status)) {
           const existing = await findHistory(api, store, t.id);
           // Already stored as of this update (e.g. a backfill re-walking the old window).
           if (existing?.ticketUpdatedAt && new Date(existing.ticketUpdatedAt).getTime() === new Date(t.updated_at).getTime()) {
@@ -460,12 +623,18 @@ export async function syncHistory(ctx, store) {
           if (budget && budget.remaining < budget.total * HISTORY_BUDGET_SHARE) throw new FreshdeskRateLimit(60);
           examined++;
           const convos = (await freshdesk(store, "GET", `/tickets/${t.id}/conversations?per_page=100`)) || [];
-          const answer = convos.filter(isAgentReply).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
+          // Replies the app posted itself are left out by conversation id, whatever the tags say
+          // (Live-mode AI replies are posted as an agent, and tags are best effort).
+          const bot = await botRepliesOn(api, store, t.id);
+          const answer = humanReplies(convos, bot).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
           if (answer.trim()) {
             const values = { ticketId: t.id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at };
             if (existing) await api.internal.crmHistory.update(existing.id, values);
             else await api.internal.crmHistory.create({ storeId: store.id, ...values });
             saved++;
+          } else if (existing) {
+            // Nothing written by a person is left on this ticket: drop what was stored before.
+            await api.internal.crmHistory.delete(existing.id);
           }
         }
         cursor = new Date(t.updated_at);
@@ -480,7 +649,6 @@ export async function syncHistory(ctx, store) {
       logger.warn({ err, storeId: store.id }, "crm history sync failed");
     }
   }
-
   // Caught up: drop tickets that have rolled out of the 12-month window.
   if (!error && !retryAfter && !more) {
     try {
@@ -489,7 +657,6 @@ export async function syncHistory(ctx, store) {
       logger.warn({ err, storeId: store.id }, "crm history prune failed");
     }
   }
-
   await saveState(api, store, {
     historyFrom,
     historyCursor: cursor.toISOString(),
@@ -504,7 +671,6 @@ export async function syncHistory(ctx, store) {
 }
 
 // ─────────────────────────── archived-ticket backfill ───────────────────────────
-
 // Freshdesk archives closed tickets after a few months, and archived tickets drop
 // out of GET /tickets and search — the list-based sync above can't see them. They
 // are readable only by id (/tickets/archived/{id}), so this walks ids downward from
@@ -523,7 +689,6 @@ export async function syncArchived(ctx, store) {
   let saved = 0;
   let retryAfter = 0;
   let error = "";
-
   try {
     if (!a.nextId) {
       const [oldest] = (await freshdesk(store, "GET", `/tickets?updated_since=${encodeURIComponent(windowStart.toISOString())}&order_by=updated_at&order_type=asc&per_page=1`)) || [];
@@ -548,9 +713,11 @@ export async function syncArchived(ctx, store) {
       if (!t) { a.misses = (a.misses || 0) + 1; a.nextId--; continue; }
       a.misses = 0;
       const tags = (t.tags || []).map((x) => String(x).toLowerCase());
-      if (new Date(t.updated_at) >= windowStart && [STATUS_RESOLVED, STATUS_CLOSED].includes(t.status) && !tags.includes(crm.answeredTag)) {
+      // Same rule as syncHistory: not the ai-answered / ai-blocked tickets, and not the app's own replies.
+      if (new Date(t.updated_at) >= windowStart && [STATUS_RESOLVED, STATUS_CLOSED].includes(t.status) && !isBotTagged(tags, crm)) {
         const convos = (await freshdesk(store, "GET", `/tickets/archived/${id}/conversations?per_page=100`)) || [];
-        const answer = convos.filter(isAgentReply).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
+        const bot = await botRepliesOn(api, store, id);
+        const answer = humanReplies(convos, bot).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
         if (answer.trim()) {
           await api.internal.crmHistory.create({ storeId: store.id, ticketId: id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at });
           saved++;
@@ -568,7 +735,6 @@ export async function syncArchived(ctx, store) {
       logger.warn({ err, storeId: store.id }, "crm archived history sync failed");
     }
   }
-
   if (a.done && !a.doneAt) a.doneAt = new Date().toISOString();
   await saveState(api, store, {
     archive: a,
@@ -579,6 +745,53 @@ export async function syncArchived(ctx, store) {
   });
   if (saved) await refreshHistoryCount(api, store);
   return { archive: true, probed, saved, error, retryAfter, more: !a.done && !retryAfter && !error };
+}
+
+// Sync ONE ticket now, any status. Human public replies only (bot replies excluded by conversation id).
+export async function syncTicket(ctx, store, ticketId, ticket = null) {
+  const { api } = ctx;
+  const t = ticket || (await freshdesk(store, "GET", `/tickets/${ticketId}`));
+  if (!t) return { saved: false, reason: "ticket not found" };
+  const existing = await findHistory(api, store, t.id);
+  const convos = (await freshdesk(store, "GET", `/tickets/${t.id}/conversations?per_page=100`)) || [];
+  const bot = await botRepliesOn(api, store, t.id);
+  const answer = humanReplies(convos, bot).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
+  if (!answer.trim()) {
+    if (existing) await api.internal.crmHistory.delete(existing.id);
+    return { saved: false, reason: "no human public reply" };
+  }
+  const values = { ticketId: t.id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at };
+  if (existing) await api.internal.crmHistory.update(existing.id, values);
+  else await api.internal.crmHistory.create({ storeId: store.id, ...values });
+  return { saved: true };
+}
+
+// Every few minutes: re-sync tickets updated recently (open or closed).
+export async function syncRecent(ctx, store, minutes = 30) {
+  const { api } = ctx;
+  if (!freshdeskConnected(store)) return { skipped: true };
+  const since = new Date(Date.now() - minutes * 60 * 1000).toISOString();
+  let synced = 0;
+  try {
+    for (let page = 1; page <= 3; page++) {
+      const tickets = await freshdesk(store, "GET", `/tickets?updated_since=${encodeURIComponent(since)}&order_by=updated_at&order_type=desc&per_page=30&page=${page}`);
+      if (!tickets?.length) break;
+      for (const t of tickets) {
+        const existing = await findHistory(api, store, t.id);
+        if (existing?.ticketUpdatedAt && new Date(existing.ticketUpdatedAt).getTime() === new Date(t.updated_at).getTime()) continue;
+        const budget = freshdeskBudget(store);
+        if (budget && budget.remaining < budget.total * HISTORY_BUDGET_SHARE) throw new FreshdeskRateLimit(60);
+        await syncTicket(ctx, store, t.id, t);
+        synced++;
+      }
+      if (tickets.length < 30) break;
+    }
+  } catch (err) {
+    if (err instanceof FreshdeskRateLimit) return { synced, retryAfter: err.retryAfter || 60 };
+    throw err;
+  }
+  await refreshHistoryCount(api, store);
+  return { synced };
 }
 
 async function findHistory(api, store, ticketId) {
@@ -592,7 +805,7 @@ async function findHistory(api, store, ticketId) {
 
 async function refreshHistoryCount(api, store) {
   let n = 0;
-  let page = await api.internal.crmHistory.findMany({ filter: { storeId: { equals: store.id } }, select: { id: true }, first: 250 });
+  let page = await api.internal.crmHistory.findMany({ filter: { storeId: { equals: store.id } }, sort: [{ id: "Ascending" }], select: { id: true }, first: 250 });
   n += page.length;
   while (page.hasNextPage && n < 50_000) {
     page = await page.nextPage();
@@ -602,7 +815,6 @@ async function refreshHistoryCount(api, store) {
 }
 
 // ─────────────────────────── formatting ───────────────────────────
-
 export function withSignature(text, signature) {
   const sig = String(signature || "").trim();
   return sig ? `${String(text).trim()}\n\n${sig}` : String(text).trim();

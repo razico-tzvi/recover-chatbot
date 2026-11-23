@@ -5,6 +5,15 @@ import {
   resolveCrm, matchBlocklist, mergeTopics, UNANSWERED_RE, questionKey,
 } from "../lib/defaults";
 import { freshdeskConnected, createFreshdeskTicket } from "../lib/integrations";
+import { fetchProductContent, searchProductQA, searchProductTabs } from "../lib/productContent";
+import {
+  productHasConfigurator,
+  summarizeConfigurator,
+  searchProductConfigurator,
+  formatFullSummary,
+} from "../lib/productConfigurator";
+import { searchUgcMedia } from "../lib/ugc";
+import { searchAgentAnswers } from "../lib/crm";
 
 /**
  * POST /chat — the storefront widget's endpoint.
@@ -19,21 +28,23 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
   const body = request.body || {};
   let messages = Array.isArray(body.messages) ? body.messages.slice(-40) : [];
   const storeHash = body.storeHash || connections.bigcommerce.currentStoreHash;
-
   if (!storeHash) return reply.code(400).send({ error: "Missing storeHash." });
   if (messages.length === 0 || messages[messages.length - 1]?.role !== "user") {
     return reply.code(400).send({ error: "Last message must be from the user." });
   }
 
-  // Per-store config (internal API bypasses access control for this server call).
-  const stores = await api.internal.bigcommerce.store.findMany({
-    filter: { storeHash: { equals: storeHash } },
-    first: 1,
-  });
+  const stores = await timed(
+    () => api.internal.bigcommerce.store.findMany({
+      filter: { storeHash: { equals: storeHash } },
+      first: 1,
+    }),
+    "store lookup",
+    logger
+  );
+  if (stores === TIMED_OUT) return sendText(request, reply, TRY_AGAIN_TEXT);
   const store = stores[0];
   if (!store) return reply.code(404).send({ error: "Store not installed." });
 
-  // Production runs on Anthropic; the OpenAI-compatible endpoint is for dev/testing only.
   const provider = (store.llmProvider || process.env.LLM_PROVIDER || "anthropic").toLowerCase();
   const model = store.llmModel || (provider === "anthropic" ? "" : process.env.OPENAI_MODEL);
   const baseUrl = store.llmBaseUrl || process.env.OPENAI_BASE_URL;
@@ -42,7 +53,6 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
     (provider === "anthropic" ? process.env.ANTHROPIC_API_KEY : process.env.OPENAI_API_KEY) ||
     "not-needed";
 
-  // Anthropic needs model + key (fixed endpoint); OpenAI-compatible needs base URL + model.
   const devOnlyBlocked = provider !== "anthropic" && process.env.GADGET_ENV === "production";
   const configured = provider === "anthropic" ? !!(model && apiKey && apiKey !== "not-needed") : !!(baseUrl && model) && !devOnlyBlocked;
   if (!configured) {
@@ -52,78 +62,118 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
 
   const ip = clientIp(request);
   const sessionId = body.sessionId ? String(body.sessionId).slice(0, 100) : "";
-  // The shopper's own storefront cart (read by the widget), for assisted-conversion attribution.
   const storefrontCartId = /^[A-Za-z0-9-]{8,64}$/.test(String(body.cartId || "")) ? String(body.cartId) : "";
   const safeguards = resolveSafeguards(store);
-  const limited = await checkRateLimits(api, { store, sessionId, ip, safeguards });
+
+  const limited = await timed(() => checkRateLimits(api, { store, sessionId, ip, safeguards }), "rate limit check", logger);
+  if (limited === TIMED_OUT) return sendText(request, reply, TRY_AGAIN_TEXT);
   if (limited) {
     await logSafety(api, { storeId: store.id, sessionId, ip, kind: "rate_limit", detail: limited.rule });
     return sendText(request, reply, limited.text);
   }
 
-  // Image uploads are a feature toggle; drop images server-side when it's off.
   if (!resolveFeatures(store).vision) messages = messages.map(({ images, ...m }) => m);
 
-  // Topic blocklist (Freshdesk tab; shared with ticket answering). A message on a
-  // blocked topic never gets an AI-written answer: the set response is sent word
-  // for word, or with no set response the topic is left for customer service.
   const lastUser = messages[messages.length - 1] || {};
   const playbookVersion = store.salesPlaybook?.trim() ? Number(store.learningState?.activeVersion) || 0 : 0;
+
+  await ensureSession(api, {
+    storeId: store.id, sessionId, userText: String(lastUser.content || ""),
+    hasImages: Array.isArray(lastUser.images) && lastUser.images.length > 0,
+    provider, model, playbookVersion, logger,
+  });
+
   const blocked = matchBlocklist(String(lastUser.content || ""), resolveCrm(store).blocklist);
   if (blocked) await logSafety(api, { storeId: store.id, sessionId, ip, kind: "blocked_topic", detail: blocked.topic });
   if (blocked?.response) {
     sendText(request, reply, blocked.response);
     try {
-      await persistTurn(api, {
+      await withTimeout(() => persistTurn(api, {
         storeId: store.id, sessionId, userText: String(lastUser.content || ""), userImages: lastUser.images,
         assistantText: blocked.response, provider, model, ip, toolsUsed: [],
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, storefrontCartId, playbookVersion, blocked: true,
-      });
+      }), "persist turn");
     } catch (err) {
       logger.error({ err }, "persist turn failed");
     }
     return;
   }
 
-  const bc = await connections.bigcommerce.forStoreHash(storeHash);
+  const bc = await timed(() => connections.bigcommerce.forStoreHash(storeHash), "bigcommerce connection", logger);
+  if (bc === TIMED_OUT) return sendText(request, reply, TRY_AGAIN_TEXT);
 
-  // Built-in guardrails + the store's context blocks + the page the shopper is on.
-  let system = buildSystem(store, body.page);
+  // Split system prompt into fixed (cached) and dynamic (uncached) parts
+  const fixedSystem = buildSystem(store, body.page);
+  let dynamicSystem = "";
+
   if (blocked) {
-    system += `\n\n--- BLOCKED TOPIC (applies to the shopper's latest message only) ---\nThe latest message is about "${blocked.topic}", which this store's customer service team handles personally. Do NOT answer it, give advice, or state facts or policies about it, and don't speculate about what the store sells. Say briefly that the customer service team handles this directly and offer a human handoff (ask for their email if you don't have it).`;
+    dynamicSystem += `\n\n--- BLOCKED TOPIC (applies to the shopper's latest message only) ---\nThe latest message is about "${blocked.topic}", which this store's customer service team handles personally. Do NOT answer it, give advice, or state facts or policies about it, and don't speculate about what the store sells. Say briefly that the customer service team handles this directly and offer a human handoff (ask for their email if you don't have it).`;
   }
+
+  if (!blocked) {
+    try {
+      const recentUser = messages.filter((m) => m.role === "user").slice(-2).map((m) => String(m.content || "")).join(" ");
+      const answers = await timed(() => searchAgentAnswers(api, store, recentUser), "agent answers lookup", logger);
+      if (answers !== TIMED_OUT && answers.length) {
+        logger.info({ sessionId, matches: answers.length }, "chat: agent answers injected");
+        dynamicSystem +=
+          "\n\n--- CONFIRMED ANSWERS FROM OUR SUPPORT AGENTS (newest first) ---\n" +
+          "These replies were written by our support team for real customers. Treat them as confirmed store knowledge. " +
+          "If the product Q&A or fit chart has no match but an answer below covers the question, answer from it and do NOT say you have no confirmed data or send the shopper to support. " +
+          "If it conflicts with product Q&A or the fit chart, say what each says and mention the agent's condition. Override rules still win. " +
+          "Use only the product facts; ignore anything specific to one customer's order, name or contact details.\n\n" +
+          answers.map((e, i) => `#${i + 1} Ticket: ${scrub(e.subject)}\nAgent reply:\n${scrub(e.answer).slice(0, 1200)}`).join("\n\n");
+      }
+    } catch (err) {
+      logger.warn({ err, sessionId }, "agent answers lookup failed");
+    }
+  }
+
   const allowed = enabledTools(store);
   const tools = TOOLS.filter((t) => allowed.has(t.function.name));
 
-  // Stream the reply as newline-delimited JSON. We hijack the response to write
-  // chunks directly, so CORS headers are set manually here (route.options CORS is
-  // bypassed for hijacked responses; the preflight OPTIONS still uses it).
   const write = startStream(request, reply);
-
+  write({ type: "status", text: STATUS_TEXT.thinking });
+  const heartbeat = setInterval(() => write({ type: "ping" }), HEARTBEAT_MS);
   let assistantText = "";
   const toolsUsed = [];
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const signals = { products: [], coupons: [], shippingEstimates: 0, faqMisses: [] };
+  const emit = (t) => { if (t) { assistantText += t; write({ type: "delta", text: t }); } };
+
   try {
     await runChatStream({
-      provider, baseUrl, model, apiKey, messages, bc, logger, system, tools, allowed,
+      provider, baseUrl, model, apiKey, messages, bc, logger, fixedSystem, dynamicSystem, tools, allowed,
       api, sessionId, storeHash, store, emails, ip, safeguards, toolsUsed, usage, signals,
-      onDelta: (t) => { if (t) { assistantText += t; write({ type: "delta", text: t }); } },
+      onDelta: emit,
+      onStatus: (key) => write({ type: "status", tool: key, text: STATUS_TEXT[key] || STATUS_TEXT.working }),
     });
+
+    if (!assistantText.trim()) {
+      logger.warn({ sessionId, toolsUsed }, "chat finished with no answer text; sending fallback");
+      emit(EMPTY_ANSWER_TEXT);
+    }
     write({ type: "done" });
   } catch (err) {
     logger.error({ err }, "chat stream failed");
-    write({ type: "error" });
+    if (err instanceof StepTimeoutError) {
+      emit((assistantText.trim() ? "\n\n" : "") + TRY_AGAIN_TEXT);
+      write({ type: "done" });
+    } else {
+      write({ type: "error" });
+    }
+  } finally {
+    clearInterval(heartbeat);
   }
-  try { reply.raw.end(); } catch (e) {}
 
-  // Persist the turn for the admin conversation view (best-effort; never blocks the reply).
+  try { reply.raw.end(); } catch (e) { }
+
   try {
-    await persistTurn(api, {
+    await withTimeout(() => persistTurn(api, {
       storeId: store.id, sessionId, userText: String(lastUser.content || ""),
       userImages: lastUser.images, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId, playbookVersion,
       signals, blocked: !!blocked,
-    });
+    }), "persist turn");
   } catch (err) {
     logger.error({ err }, "persist turn failed");
   }
@@ -138,15 +188,14 @@ function startStream(request, reply) {
     "Access-Control-Allow-Origin": request.headers.origin || "*",
     Vary: "Origin",
   });
-  return (obj) => { try { raw.write(JSON.stringify(obj) + "\n"); } catch (e) {} };
+  return (obj) => { try { raw.write(JSON.stringify(obj) + "\n"); } catch (e) { } };
 }
 
-// A fixed reply in the same NDJSON format the widget reads.
 function sendText(request, reply, text) {
   const write = startStream(request, reply);
   write({ type: "delta", text });
   write({ type: "done" });
-  try { reply.raw.end(); } catch (e) {}
+  try { reply.raw.end(); } catch (e) { }
 }
 
 function clientIp(request) {
@@ -154,42 +203,122 @@ function clientIp(request) {
   return (fwd || request.ip || "").slice(0, 64);
 }
 
-// Cross-origin: the storefront (a different domain) calls this. Gadget's
-// built-in CORS handles the preflight OPTIONS and sets the headers.
 route.options = {
   cors: { origin: true, methods: ["POST", "OPTIONS"], allowedHeaders: ["Content-Type"] },
 };
 
 export default route;
 
-// ─────────────────────────── chat loop ───────────────────────────
+// ─────────────────────────── time limits ───────────────────────────
+const STEP_TIMEOUT_MS = 30 * 1000;
+const HEARTBEAT_MS = 10 * 1000;
+const TRY_AGAIN_TEXT = "Sorry, that's taking longer than expected. Please try again in a moment.";
+const EMPTY_ANSWER_TEXT = "Sorry, I wasn't able to put an answer together just now. Please try asking again, or I can pass you to our team.";
 
+const STATUS_TEXT = {
+  thinking: "Thinking…",
+  working: "Working on it…",
+  final: "Writing your answer…",
+  search_products: "Searching products…",
+  get_product_details: "Looking up the product…",
+  search_product_qa: "Checking product Q&A and specs…",
+  search_product_configurator: "Checking the configurator…",
+  search_ugc: "Finding customer photos…",
+  add_to_cart: "Adding to your cart…",
+  view_cart: "Checking your cart…",
+  update_cart_item: "Updating your cart…",
+  remove_from_cart: "Updating your cart…",
+  apply_coupon: "Applying the coupon…",
+  get_shipping_estimate: "Estimating shipping…",
+  get_promotions: "Checking promotions…",
+  get_related_products: "Finding related products…",
+  compare_products: "Comparing products…",
+  browse_categories: "Browsing categories…",
+  get_product_reviews: "Reading reviews…",
+  lookup_order: "Looking up your order…",
+  search_faq: "Checking store policies…",
+  escalate_to_human: "Passing this to our team…",
+};
+
+class StepTimeoutError extends Error {
+  constructor(label, ms = STEP_TIMEOUT_MS) {
+    super(`${label} timed out after ${ms}ms`);
+    this.name = "StepTimeoutError";
+    this.label = label;
+  }
+}
+
+function withTimeout(work, label, ms = STEP_TIMEOUT_MS) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new StepTimeoutError(label, ms)), ms);
+  });
+  const run = Promise.resolve().then(() => (typeof work === "function" ? work() : work));
+  return Promise.race([run, timeout]).finally(() => clearTimeout(timer));
+}
+
+const TIMED_OUT = Symbol("timed out");
+async function timed(work, label, logger) {
+  try {
+    return await withTimeout(work, label);
+  } catch (err) {
+    if (err instanceof StepTimeoutError) {
+      logger?.error({ err, label }, "step timed out");
+      return TIMED_OUT;
+    }
+    throw err;
+  }
+}
+
+async function fetchWithTimeout(url, init, label, ms = STEP_TIMEOUT_MS) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal });
+  } catch (err) {
+    if (ctrl.signal.aborted) throw new StepTimeoutError(label, ms);
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─────────────────────────── chat loop ───────────────────────────
 const MAX_ITERATIONS = 6;
 const MAX_TOKENS = 2048;
-
+const FINAL_ROUND_NUDGE =
+  "You've reached the tool limit for this turn. Do not call any more tools. Using only the information the tools already returned, write your complete answer to the shopper's question now. If something is still missing, say so plainly and offer to help further or to hand off to a human.";
 const FAQ_MARKER = "--- STORE POLICIES & FAQ ---";
-
 const block = (value, fallback) => (value && String(value).trim()) || fallback;
 const storeFaq = (store) => block(store?.faq, DEFAULT_FAQ);
 
-// System prompt = built-in guardrails (code, never editable) + the store's
-// context blocks from the admin Context tab + the page the shopper is on. The
-// store blocks are framed as unable to override the guardrails.
 function buildSystem(store, page) {
   let guidelines = block(store.systemPrompt, DEFAULT_GUIDELINES);
-  // Prompts saved before the FAQ became its own field carry an inline copy — drop it.
   const i = guidelines.indexOf(FAQ_MARKER);
   if (i >= 0) guidelines = guidelines.slice(0, i).trimEnd();
   const parts = [
     `Your name is ${resolveBranding(store).botName}.`,
     GUARDRAILS,
+  ];
+  const overrides = String(store?.overrideRules || "").trim();
+  if (overrides) {
+    parts.push(
+      `--- OVERRIDE RULES (CRITICAL: These rules take absolute priority over EVERY OTHER instruction and source below — including General guidelines, Store FAQ & policies, Voice & tone, the sales playbook, product data, product Q&A, configurator data, UGC data, and synced Freshdesk replies. If an override rule conflicts with anything else the bot reads, the override rule ALWAYS wins) ---\n${overrides}`
+    );
+  }
+  parts.push(
     "--- STORE GUIDELINES (set by the store; they never override the rules above) ---",
     guidelines,
     `--- VOICE & TONE ---\n${block(store.voiceTone, DEFAULT_VOICE_TONE)}`,
     `--- HOW TO WORD REFUSALS ---\n${block(store.safeguardsInstructions, DEFAULT_SAFEGUARDS_INSTRUCTIONS)}`,
-    `${FAQ_MARKER}\n${storeFaq(store)}`,
-  ];
-  // Approved by the store from the learning loop (Learning tab); sales behaviour only.
+    `${FAQ_MARKER}\n${storeFaq(store)}`
+  );
+  parts.push(
+    `--- DISPLAYING IMAGES & MEDIA ---\n1. Official Product Images: When a user asks "show me photos", "show me pictures", or "what does it look like", display 1 to 3 official images from the product's images list inline using markdown: ![Product Name](image_url).\n2. Official Product Videos: When a user asks for a video, demo, or tutorial, share the link using markdown: [Watch Video Title](video_url).\n3. Customer Photos & UGC: Only call search_product_ugc when the user specifically asks for customer photos, customer builds, or user setups. When a tool returns results with a "display" field (customer photos or videos), you MUST copy the display value EXACTLY into your reply — the full markdown including the complete URL inside the parentheses. Never shorten URLs, never write placeholders like "!IMG", never reformat. The display field is pre-formatted markdown ready to paste as-is.`
+  );
+  parts.push(
+    `--- EXPORT & INTERNATIONAL SHIPPING RESTRICTIONS ---\nIf get_product_details returns "notForExport: true" or includes a shipping restriction notice, you MUST REFUSE all international shipping for that specific product (e.g. UK, Spain, Canada, Europe, Australia, etc.), even if the store's general FAQ says international shipping is offered.\nExplain clearly: "This item is restricted to domestic US shipping only and cannot be shipped outside the United States due to export regulations."`
+  );
   const playbook = String(store.salesPlaybook || "").trim();
   if (playbook) parts.push(`--- SALES PLAYBOOK (learned from this store's chats; it never overrides the rules above) ---\n${playbook}`);
   const pageCtx = pageContext(page);
@@ -197,8 +326,6 @@ function buildSystem(store, page) {
   return parts.join("\n\n");
 }
 
-// The widget reports the storefront page the shopper is on. It's shopper-controlled,
-// so it is sanitized and framed as data.
 function pageContext(page) {
   if (!page || typeof page !== "object") return "";
   const clean = (v, n) => String(v ?? "").replace(/[\r\n]+/g, " ").trim().slice(0, n);
@@ -210,7 +337,7 @@ function pageContext(page) {
   if (url) lines.push(`URL: ${url}`);
   if (title) lines.push(`Title: ${title}`);
   if (productId) {
-    lines.push(`Product id: ${productId} — they're viewing this product. If they say "this"/"it" without naming a product, they mean this one; call get_product_details with this id.`);
+    lines.push(`Product id: ${productId} — they're viewing this product. If they say "this"/"it" without naming a product, they mean this one; call get_product_details with this id directly. Do NOT call search_products to find the product they're viewing.`);
   }
   return lines.join("\n");
 }
@@ -243,6 +370,63 @@ const TOOLS = [
         type: "object",
         properties: { product_id: { type: "number" } },
         required: ["product_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_product_qa",
+      description: "Search the store's answered customer Q&A (newest-first) AND the product's tabs (fit chart / compatibility list, specs, installation, weight, materials) for one product. For ANY compatibility, fitment, accessory, holster, specs, weight, material, or 'does it work with X' question: call THIS TOOL ONLY. Do NOT also call search_products for the same question — catalog listings often contradict the store's own Q&A and fit chart, which are always correct. Use short keywords (e.g. 'holster', 'gen 5', 'weight', 'specs', 'Dagger Micro').",
+      parameters: {
+        type: "object",
+        properties: {
+          product_id: { type: "number", description: "Product id (from the shopper's current page or search_products)." },
+          query: { type: "string", description: "Keywords to match against questions, answers, specs, and the fit chart (e.g. 'holster', 'gen 5', 'weight', 'material', 'Dagger')." },
+          limit: { type: "number", description: "Optional limit. Omit to receive all matches." },
+        },
+        required: ["product_id", "query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_product_configurator",
+      description:
+        "Search a configurable product's steps and choices (options, price deltas, gun/model fitment). Use for ANY question about a product that has a configurator: 'what options', 'which adapter for Glock 21', 'total with cheek rest and sling'. The configurator's prices OVERRIDE the catalog price. Pass an empty query to list all steps and choices. If the result says the product has no configurator, don't call this again for that product.",
+      parameters: {
+        type: "object",
+        properties: {
+          product_id: { type: "number" },
+          query: {
+            type: "string",
+            description:
+              "Keywords — gun model ('Glock 21'), accessory ('cheek rest'), or empty for all.",
+          },
+        },
+        required: ["product_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_ugc",
+      description:
+        "Search approved customer photos and videos (user-generated content) for a product. " +
+        "Use when the customer asks to see real customer photos, user images, community photos, " +
+        "or how a product looks in real life / installed on their firearm.",
+      parameters: {
+        type: "object",
+        properties: {
+          productId: { type: "string", description: "The product ID" },
+          query: {
+            type: "string",
+            description: "Optional search terms, e.g. 'Glock 19', 'holster', 'range'",
+          },
+        },
+        required: ["productId"],
       },
     },
   },
@@ -401,14 +585,11 @@ const TOOLS = [
   },
 ];
 
-// ─────────────────── multimodal (image) helpers ───────────────────
-
 function parseDataUrl(u) {
   const m = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/.exec(String(u || ""));
   return m ? { mediaType: m[1], data: m[2] } : null;
 }
 
-// OpenAI-compatible: images become image_url parts (data URI or http URL).
 function openaiContent(m) {
   if (m.role === "user" && Array.isArray(m.images) && m.images.length) {
     const parts = [];
@@ -419,7 +600,6 @@ function openaiContent(m) {
   return String(m.content ?? "");
 }
 
-// Anthropic: images become image blocks (base64 source, or url source for http).
 function anthropicContent(m) {
   if (m.role === "user" && Array.isArray(m.images) && m.images.length) {
     const blocks = [];
@@ -434,9 +614,6 @@ function anthropicContent(m) {
   return String(m.content ?? "");
 }
 
-// Store the user message + assistant reply and upsert the session summary,
-// so the app's Conversations view can list sessions and show transcripts. The
-// user message keeps the IP (per-IP rate limits); the reply keeps the tools used.
 async function persistTurn(api, { storeId, sessionId, userText, userImages, assistantText, provider, model, ip, toolsUsed, usage, storefrontCartId, playbookVersion, signals, blocked }) {
   if (!sessionId || !storeId) return;
   const imgs = Array.isArray(userImages) && userImages.length ? userImages : null;
@@ -449,9 +626,7 @@ async function persistTurn(api, { storeId, sessionId, userText, userImages, assi
       tools: toolsUsed && toolsUsed.length ? toolsUsed : null,
     });
   }
-
   const added = ((userText || imgs) ? 1 : 0) + (assistantText.trim() ? 1 : 0);
-  // Analytics: token usage and cost (priced at the turn's model), funnel stages, cart link.
   const used = toolsUsed || [];
   const cost = tokenCost(model, usage);
   const stats = (row) => ({
@@ -463,23 +638,35 @@ async function persistTurn(api, { storeId, sessionId, userText, userImages, assi
     ...(storefrontCartId ? { storefrontCartId } : {}),
     ...turnSignals(row, { userText, assistantText, used, signals, blocked }),
   });
+  const preview = (userText || (imgs ? "(image)" : "")).trim().slice(0, 140);
   const row = await findSession(api, storeId, sessionId);
   if (row) {
-    // A chat keeps the playbook version it started with (rows created by a flag or
-    // handoff before the first saved turn get it here).
     const pv = row.playbookVersion == null ? { playbookVersion } : {};
-    await api.internal.chatSession.update(row.id, { messageCount: (row.messageCount || 0) + added, provider, model, ...pv, ...stats(row) });
+    await api.internal.chatSession.update(row.id, {
+      ...(preview ? { preview } : {}),
+      messageCount: (row.messageCount || 0) + added,
+      provider,
+      model,
+      ...pv,
+      ...stats(row),
+    });
   } else {
-    await api.internal.chatSession.create({ sessionId, storeId, preview: (userText || "(image)").slice(0, 140), messageCount: added, provider, model, playbookVersion, ...stats(null) });
+    await api.internal.chatSession.create({
+      sessionId,
+      storeId,
+      preview: preview || "(new chat)",
+      messageCount: added,
+      provider,
+      model,
+      playbookVersion,
+      ...stats(null),
+    });
   }
 }
 
-// Merge this turn's Analytics signals into the session row's lists (bounded).
-// Only fields that change are returned, so older rows stay null until they do.
 function turnSignals(row, { userText, assistantText, used, signals, blocked }) {
   const out = {};
   const sig = signals || { products: [], coupons: [], shippingEstimates: 0, faqMisses: [] };
-
   if (sig.products.length) {
     const prev = Array.isArray(row?.productsAsked) ? row.productsAsked : [];
     const merged = [...prev];
@@ -492,9 +679,6 @@ function turnSignals(row, { userText, assistantText, used, signals, blocked }) {
   }
   if (sig.coupons.length) out.couponsTried = [...(Array.isArray(row?.couponsTried) ? row.couponsTried : []), ...sig.coupons].slice(-20);
   if (sig.shippingEstimates) out.shippingEstimates = (row?.shippingEstimates || 0) + sig.shippingEstimates;
-
-  // FAQ gap list: FAQ searches with no match, and replies where the bot said it
-  // couldn't answer (the shopper's question is recorded). Blocked topics are deliberate.
   if (!blocked) {
     const gaps = [...sig.faqMisses];
     const q = String(userText || "").trim();
@@ -506,10 +690,37 @@ function turnSignals(row, { userText, assistantText, used, signals, blocked }) {
       if (add.length) out.unanswered = [...prev, ...add].slice(-10);
     }
   }
-
   const topics = mergeTopics(row?.topics, userText, used);
   if (topics && JSON.stringify(topics) !== JSON.stringify(row?.topics || null)) out.topics = topics;
   return out;
+}
+
+async function ensureSession(api, { storeId, sessionId, userText, hasImages, provider, model, playbookVersion, logger }) {
+  if (!storeId) return;
+  if (!sessionId) {
+    logger?.warn({ storeId }, "chat request without sessionId; this conversation will not be saved");
+    return;
+  }
+  try {
+    await withTimeout(async () => {
+      const preview = (userText || (hasImages ? "(image)" : "(new chat)")).slice(0, 140);
+      const row = await findSession(api, storeId, sessionId);
+      if (row) {
+        if (preview && preview !== "(new chat)") {
+          await api.internal.chatSession.update(row.id, { preview });
+        }
+        return;
+      }
+      try {
+        await api.internal.chatSession.create({ sessionId, storeId, preview, messageCount: 0, provider, model, playbookVersion });
+      } catch (err) {
+        logger?.error({ err, sessionId }, "ensure session create failed; retrying with basic fields");
+        await api.internal.chatSession.create({ sessionId, storeId, preview, messageCount: 0 });
+      }
+    }, "ensure session");
+  } catch (err) {
+    logger?.error({ err, sessionId, storeId }, "ensure session failed");
+  }
 }
 
 async function findSession(api, storeId, sessionId) {
@@ -518,23 +729,19 @@ async function findSession(api, storeId, sessionId) {
 }
 
 // ─────────────────────────── safeguards ───────────────────────────
-
-// Counts matching records up to `limit` (paging past Gadget's 250-per-page cap).
 async function countUpTo(model, filter, limit) {
   let n = 0;
   let page = await model.findMany({ filter, first: Math.min(250, limit), select: { id: true } });
-  for (;;) {
+  for (; ;) {
     n += page.length;
     if (n >= limit || !page.hasNextPage) return n;
     page = await page.nextPage();
   }
 }
-
 const since = (ms) => new Date(Date.now() - ms).toISOString();
 const MINUTE = 60 * 1000;
 const DAY = 24 * 60 * MINUTE;
 
-// Limits a human never hits; returns { rule, text } when this message is over one.
 async function checkRateLimits(api, { store, sessionId, ip, safeguards }) {
   const msgs = api.internal.chatMessage;
   const base = { storeId: { equals: store.id }, role: { equals: "user" } };
@@ -557,14 +764,15 @@ async function checkRateLimits(api, { store, sessionId, ip, safeguards }) {
 
 async function logSafety(api, { storeId, sessionId, ip, kind, detail, expiresAt }) {
   try {
-    await api.internal.safetyEvent.create({ storeId, sessionId: sessionId || "", ip: ip || "", kind, detail: detail || "", expiresAt: expiresAt || null });
+    await withTimeout(
+      () => api.internal.safetyEvent.create({ storeId, sessionId: sessionId || "", ip: ip || "", kind, detail: detail || "", expiresAt: expiresAt || null }),
+      "safety log"
+    );
   } catch (e) {
     /* logging must never break the chat */
   }
 }
 
-// Flags the conversation for the admin's Flagged filter, and emails the store's
-// alert address when flags spike (at most once a day).
 async function flagSession(ctx, reason) {
   const { api, store, sessionId, logger } = ctx;
   if (!sessionId) return;
@@ -574,7 +782,6 @@ async function flagSession(ctx, reason) {
     if (row) await api.internal.chatSession.update(row.id, fields);
     else await api.internal.chatSession.create({ sessionId, storeId: store.id, preview: "(flagged)", messageCount: 0, ...fields });
     await logSafety(api, { storeId: store.id, sessionId, ip: ctx.ip, kind: "flag", detail: reason });
-
     const { flagSpikeThreshold, alertEmail } = ctx.safeguards;
     const lastAlert = store.lastFlagAlertAt ? new Date(store.lastFlagAlertAt).getTime() : 0;
     if (!alertEmail || !ctx.emails || Date.now() - lastAlert < DAY) return;
@@ -599,21 +806,32 @@ async function runChatStream(opts) {
     storeHash: opts.storeHash, store: opts.store, emails: opts.emails,
     ip: opts.ip, safeguards: opts.safeguards, allowed: opts.allowed, toolsUsed: opts.toolsUsed, signals: opts.signals,
     usage: opts.usage || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    onStatus: opts.onStatus,
   };
-  const common = { model: opts.model, apiKey: opts.apiKey, messages: opts.messages, system: opts.system, tools: opts.tools, ctx, onDelta: opts.onDelta };
+  const common = {
+    model: opts.model, apiKey: opts.apiKey, messages: opts.messages,
+    fixedSystem: opts.fixedSystem, dynamicSystem: opts.dynamicSystem,
+    tools: opts.tools, ctx, onDelta: opts.onDelta,
+  };
   if (opts.provider === "anthropic") return runAnthropicStream(common);
-  return runOpenAIStream({ ...common, baseUrl: opts.baseUrl });
+  return runOpenAIStream({ ...common, baseUrl: opts.baseUrl, system: (opts.fixedSystem || "") + (opts.dynamicSystem || "") });
 }
 
 function safeJson(s) { try { return JSON.parse(s || "{}"); } catch { return {}; } }
 
-// Read a Server-Sent-Events body line by line, passing each `data:` payload to onData.
-async function forEachSSE(res, onData) {
+async function forEachSSE(res, onData, label = "LLM stream") {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
+  for (; ;) {
+    let chunk;
+    try {
+      chunk = await withTimeout(() => reader.read(), label);
+    } catch (err) {
+      reader.cancel().catch(() => { });
+      throw err;
+    }
+    const { done, value } = chunk;
     if (done) break;
     buf += decoder.decode(value, { stream: true });
     let idx;
@@ -628,18 +846,21 @@ async function forEachSSE(res, onData) {
   }
 }
 
-// OpenAI-compatible streaming tool loop — streams the final answer via onDelta.
 async function runOpenAIStream({ baseUrl, model, apiKey, messages, system, tools, ctx, onDelta }) {
   const convo = [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: openaiContent(m) }))];
-
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+  for (let i = 0; i <= MAX_ITERATIONS; i++) {
+    const lastRound = i === MAX_ITERATIONS;
+    if (lastRound) {
+      ctx.logger?.warn({ rounds: MAX_ITERATIONS }, "tool round limit reached; forcing a final answer without tools");
+      ctx.onStatus?.("final");
+      convo.push({ role: "user", content: FINAL_ROUND_NUDGE });
+    }
+    const res = await fetchWithTimeout(`${baseUrl.replace(/\/+$/, "")}/chat/completions`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, messages: convo, ...(tools.length ? { tools, tool_choice: "auto" } : {}), max_tokens: MAX_TOKENS, stream: true, stream_options: { include_usage: true } }),
-    });
+      body: JSON.stringify({ model, messages: convo, ...(tools.length ? { tools, tool_choice: lastRound ? "none" : "auto" } : {}), max_tokens: MAX_TOKENS, stream: true, stream_options: { include_usage: true } }),
+    }, "LLM request");
     if (!res.ok || !res.body) throw new Error(`LLM ${res.status}`);
-
     let content = "";
     const toolCalls = [];
     await forEachSSE(res, (data) => {
@@ -660,30 +881,103 @@ async function runOpenAIStream({ baseUrl, model, apiKey, messages, system, tools
         }
       }
     });
-
     const calls = toolCalls.filter(Boolean);
-    if (calls.length === 0) return; // final answer already streamed
-
+    if (calls.length === 0 || lastRound) return;
     convo.push({ role: "assistant", content: content || "", tool_calls: calls });
     for (const call of calls) {
       const result = await runTool(call.function?.name, safeJson(call.function?.arguments), ctx);
       convo.push({ role: "tool", tool_call_id: call.id, content: result });
     }
+    if (content.trim()) onDelta("\n\n");
   }
 }
 
-// Anthropic Messages API streaming tool loop.
-async function runAnthropicStream({ model, apiKey, messages, system, tools: openaiTools, ctx, onDelta }) {
+/**
+ * Attaches cache_control to the last content block of the last message in the request conversation array.
+ */
+function formatMessagesWithCacheControl(messages) {
+  if (!messages || messages.length === 0) return [];
+  return messages.map((msg, idx) => {
+    if (idx !== messages.length - 1) return msg;
+
+    let content = msg.content;
+    if (typeof content === "string") {
+      return {
+        ...msg,
+        content: [
+          {
+            type: "text",
+            text: content,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+      };
+    }
+    if (Array.isArray(content) && content.length > 0) {
+      const updatedBlocks = content.map((b, bIdx) => {
+        if (bIdx === content.length - 1) {
+          return { ...b, cache_control: { type: "ephemeral" } };
+        }
+        return b;
+      });
+      return {
+        ...msg,
+        content: updatedBlocks,
+      };
+    }
+    return msg;
+  });
+}
+
+async function runAnthropicStream({ model, apiKey, messages, fixedSystem, dynamicSystem, tools: openaiTools, ctx, onDelta }) {
   const tools = openaiTools.map((t) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
   const convo = messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: anthropicContent(m) }));
 
-  for (let i = 0; i < MAX_ITERATIONS; i++) {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+  // System prompt content blocks with cache_control mark on the fixed block
+  const systemBlocks = [
+    {
+      type: "text",
+      text: fixedSystem || "",
+      cache_control: { type: "ephemeral" },
+    },
+  ];
+
+  if (dynamicSystem && dynamicSystem.trim()) {
+    systemBlocks.push({
+      type: "text",
+      text: dynamicSystem.trim(),
+    });
+  }
+
+  for (let i = 0; i <= MAX_ITERATIONS; i++) {
+    const lastRound = i === MAX_ITERATIONS;
+    if (lastRound) {
+      ctx.logger?.warn({ rounds: MAX_ITERATIONS }, "tool round limit reached; forcing a final answer without tools");
+      ctx.onStatus?.("final");
+      const lastMsg = convo[convo.length - 1];
+      if (lastMsg && Array.isArray(lastMsg.content)) lastMsg.content.push({ type: "text", text: FINAL_ROUND_NUDGE });
+    }
+
+    // Attach cache_control mark to the last block of conversation messages
+    const payloadMessages = formatMessagesWithCacheControl(convo);
+
+    const res = await fetchWithTimeout("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages: convo, ...(tools.length ? { tools } : {}), stream: true }),
-    });
-    if (!res.ok || !res.body) throw new Error(`Anthropic ${res.status}`);
+      body: JSON.stringify({
+        model,
+        max_tokens: MAX_TOKENS,
+        system: systemBlocks,
+        messages: payloadMessages,
+        ...(tools.length ? { tools, ...(lastRound ? { tool_choice: { type: "none" } } : {}) } : {}),
+        stream: true,
+      }),
+    }, "LLM request");
+
+    if (!res.ok || !res.body) {
+      ctx.logger?.error({ status: res.status, body: await res.text().catch(() => "") }, "anthropic request failed");
+      throw new Error(`Anthropic ${res.status}`);
+    }
 
     const blocks = [];
     let stopReason = null;
@@ -696,6 +990,19 @@ async function runAnthropicStream({ model, apiKey, messages, system, tools: open
         ctx.usage.cacheRead += u.cache_read_input_tokens || 0;
         ctx.usage.cacheWrite += u.cache_creation_input_tokens || 0;
         outTokens = u.output_tokens || 0;
+
+        ctx.logger?.info(
+          {
+            sessionId: ctx.sessionId,
+            storeHash: ctx.storeHash,
+            iteration: i,
+            input_tokens: u.input_tokens || 0,
+            output_tokens: u.output_tokens || 0,
+            cache_creation_input_tokens: u.cache_creation_input_tokens || 0,
+            cache_read_input_tokens: u.cache_read_input_tokens || 0,
+          },
+          "anthropic message_start prompt cache token counts"
+        );
       } else if (ev.type === "content_block_start") {
         const b = ev.content_block || {};
         blocks[ev.index] = b.type === "tool_use" ? { type: "tool_use", id: b.id, name: b.name, partial: "" } : { type: "text", text: "" };
@@ -706,12 +1013,13 @@ async function runAnthropicStream({ model, apiKey, messages, system, tools: open
         else if (ev.delta?.type === "input_json_delta") { b.partial += ev.delta.partial_json || ""; }
       } else if (ev.type === "message_delta") {
         if (ev.delta?.stop_reason) stopReason = ev.delta.stop_reason;
-        if (ev.usage?.output_tokens != null) outTokens = ev.usage.output_tokens; // cumulative for this message
+        if (ev.usage?.output_tokens != null) outTokens = ev.usage.output_tokens;
       }
     });
+
     ctx.usage.output += outTokens;
 
-    if (stopReason === "tool_use") {
+    if (stopReason === "tool_use" && !lastRound) {
       const assistant = blocks
         .filter(Boolean)
         .filter((b) => b.type === "tool_use" || (b.text && b.text.trim()))
@@ -724,27 +1032,31 @@ async function runAnthropicStream({ model, apiKey, messages, system, tools: open
         toolResults.push({ type: "tool_result", tool_use_id: b.id, content: result });
       }
       convo.push({ role: "user", content: toolResults });
+      if (assistant.some((b) => b.type === "text")) onDelta("\n\n");
       continue;
     }
-    return; // final answer already streamed
+    return;
   }
 }
 
 // ─────────────────────────── tools ───────────────────────────
-
 async function runTool(name, input, ctx) {
   const { logger } = ctx;
-  // Defense in depth: disabled tools aren't offered, and are refused if called anyway.
   if (ctx.allowed && !ctx.allowed.has(name)) return JSON.stringify({ error: `The ${name} tool is not available.` });
   if (ctx.toolsUsed && !ctx.toolsUsed.includes(name)) ctx.toolsUsed.push(name);
+  ctx.onStatus?.(name);
   try {
-    const out = await dispatchTool(name, input, ctx);
-    try { noteSignals(name, input, out, ctx.signals); } catch (e) {}
+    const out = await withTimeout(() => dispatchTool(name, input, ctx), `tool ${name}`);
+    try { noteSignals(name, input, out, ctx.signals); } catch (e) { }
     return out;
   } catch (err) {
     logger?.error({ err, tool: name }, "tool failed");
+    if (err instanceof StepTimeoutError) {
+      return JSON.stringify({
+        error: "That lookup took too long. Do NOT retry it. Apologize briefly, answer with whatever you already have, and suggest the shopper try again in a moment.",
+      });
+    }
     const status = errorStatus(err);
-    // Auth/permission failures won't fix themselves — tell the model not to retry.
     if (status === 401 || status === 403) {
       return JSON.stringify({
         error: "The store connection isn't authorized for this right now. Do NOT retry. Apologize, say this feature is temporarily unavailable, and offer a human handoff.",
@@ -754,8 +1066,6 @@ async function runTool(name, input, ctx) {
   }
 }
 
-// Analytics signals from a tool result (Analytics › Sales): products the shopper
-// asked about, coupons tried, shipping quotes given, FAQ questions with no answer.
 function noteSignals(name, input, out, signals) {
   if (!signals) return;
   const r = safeJson(out);
@@ -794,6 +1104,12 @@ async function dispatchTool(name, input, ctx) {
       return await searchProducts(bc, input, ctx);
     case "get_product_details":
       return await getProductDetails(bc, input, ctx);
+    case "search_product_qa":
+      return await searchProductQAtool(input, ctx);
+    case "search_product_configurator":
+      return await searchProductConfiguratorTool(input, ctx);
+    case "search_ugc":
+      return await searchUgcTool(input, ctx);
     case "add_to_cart":
       return await addToCart(bc, input, ctx);
     case "view_cart":
@@ -827,8 +1143,6 @@ async function dispatchTool(name, input, ctx) {
   }
 }
 
-// The BigCommerce client throws errors like "ERROR DURING GET /x: 404 - {...}";
-// pull the HTTP status out of them.
 function errorStatus(err) {
   const s = err?.status ?? err?.response?.status;
   if (s) return Number(s);
@@ -844,11 +1158,7 @@ function inStock(p) {
   return true;
 }
 
-// BigCommerce's catalog returns custom_url.url as a storefront-relative path
-// (e.g. "/s-pro-stabilizer/"). Turn it into an absolute link on the store's
-// canonical storefront so product links don't resolve against the app domain.
-const storeInfoCache = new Map(); // storeHash -> { base (no trailing slash), name, adminEmail }
-
+const storeInfoCache = new Map();
 async function storeInfo(ctx) {
   const key = ctx.storeHash || "";
   if (storeInfoCache.has(key)) return storeInfoCache.get(key);
@@ -859,10 +1169,10 @@ async function storeInfo(ctx) {
     if (raw) out.base = (/^https?:\/\//i.test(raw) ? raw : `https://${raw}`).replace(/\/+$/, "");
     out.name = info?.name || "";
     out.adminEmail = info?.admin_email || "";
+    storeInfoCache.set(key, out);
   } catch (err) {
     ctx.logger?.error({ err }, "store info fetch failed");
   }
-  storeInfoCache.set(key, out);
   return out;
 }
 
@@ -871,7 +1181,7 @@ const storeBaseUrl = async (ctx) => (await storeInfo(ctx)).base;
 function absoluteUrl(base, path) {
   const p = path || "";
   if (!p) return "";
-  if (/^https?:\/\//i.test(p)) return p; // already absolute
+  if (/^https?:\/\//i.test(p)) return p;
   if (!base) return p;
   return base + (p.startsWith("/") ? p : `/${p}`);
 }
@@ -887,20 +1197,31 @@ function mapProducts(products, base) {
   }));
 }
 
+const PRODUCT_ALIASES = [
+  { pattern: /(^|[^0-9])20\s*[\/-]?\s*20\s*n(?![a-z0-9])/i, productId: 150 },
+];
+
 async function searchProducts(bc, input, ctx) {
   const limit = Math.min(Number(input.limit) || 5, 10);
   const kw = input.keyword ? String(input.keyword).trim() : "";
+  const alias = kw ? PRODUCT_ALIASES.find((a) => a.pattern.test(kw)) : null;
+  if (alias) {
+    const pinned = await getProduct(bc, alias.productId, { include: "primary_image" });
+    if (pinned) {
+      return JSON.stringify({
+        results: mapProducts([pinned], await storeBaseUrl(ctx)),
+        note: "Exact match for the model name the shopper gave. Use this product id; don't search for other products with a similar name.",
+      });
+    }
+    ctx.logger?.warn({ productId: alias.productId, kw }, "aliased product not found; falling back to catalog search");
+  }
   const priceQ = {};
   if (input.min_price != null) priceQ["price:min"] = input.min_price;
   if (input.max_price != null) priceQ["price:max"] = input.max_price;
-
   const query = { limit, include: "primary_image", is_visible: true, ...priceQ };
   if (kw) query.keyword = kw;
   if (Number(input.category_id) > 0) query["categories:in"] = Number(input.category_id);
   let products = (await bc.v3.get("/catalog/products", { query })) || [];
-
-  // If a keyword found nothing, it may be a product line / category — look up
-  // matching categories and list their products.
   let matchedCategory = null;
   if (kw && products.length === 0) {
     let cats = (await bc.v3.get("/catalog/categories", { query: { keyword: kw, limit: 5 } }).catch(() => [])) || [];
@@ -916,30 +1237,78 @@ async function searchProducts(bc, input, ctx) {
           .catch(() => [])) || [];
     }
   }
-
-  // Still nothing and the keyword had punctuation — retry with it normalized.
   if (kw && products.length === 0 && /[-_/]/.test(kw)) {
     const relaxed = kw.replace(/[-_/]+/g, " ").trim();
     products = (await bc.v3.get("/catalog/products", { query: { ...query, keyword: relaxed } }).catch(() => [])) || [];
   }
-
   const results = mapProducts(products, await storeBaseUrl(ctx));
   if (!results.length) return JSON.stringify({ results: [], note: "No matching products or categories." });
   return JSON.stringify(matchedCategory ? { results, matchedCategory } : { results });
 }
 
+const CONFIGURATOR_STATUS_TTL_MS = 5 * 60 * 1000;
+const configuratorStatusCache = new Map();
+
+async function hasConfigurator(ctx, id) {
+  const key = `${ctx.storeHash || ""}:${id}`;
+  const hit = configuratorStatusCache.get(key);
+  if (hit && hit.until > Date.now()) return hit.has;
+  const has = await productHasConfigurator(ctx.store, id, ctx.logger);
+  if (has === null) return null;
+  configuratorStatusCache.set(key, { has, until: Date.now() + CONFIGURATOR_STATUS_TTL_MS });
+  return has;
+}
+
 async function getProductDetails(bc, input, ctx) {
   const id = Number(input.product_id);
   if (!id) return JSON.stringify({ error: "product_id is required." });
-  const p = await bc.v3.get(`/catalog/products/${id}`, { query: { include: "primary_image,variants" } });
+  
+  const p = await bc.v3.get(`/catalog/products/${id}`, { 
+    query: { include: "primary_image,images,videos,variants,custom_fields" } 
+  });
   if (!p) return JSON.stringify({ error: "No product found with that id." });
-  return JSON.stringify({
+  
+  const tabContent = await fetchProductContent(ctx.store, id, ctx.logger);
+  const hasConfig = (await hasConfigurator(ctx, id)) === true;
+  const configSummary = hasConfig
+    ? await summarizeConfigurator(ctx.store, id, ctx.logger)
+    : null;
+    
+  const images = (p.images ?? [])
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    .map((img) => img.url_zoom || img.url_standard)
+    .filter(Boolean);
+  if (images.length === 0 && (p.primary_image?.url_zoom || p.primary_image?.url_standard)) {
+    images.push(p.primary_image.url_zoom || p.primary_image.url_standard);
+  }
+  
+  const videos = (p.videos ?? [])
+    .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+    .map((v) => ({
+      title: v.title || "Product Video",
+      url: v.video_id ? `https://www.youtube.com/watch?v=${v.video_id}` : null,
+    }))
+    .filter((v) => v.url);
+
+  const isNotForExport = (p.custom_fields ?? []).some(
+    (f) => /not\s*for\s*export|no\s*export/i.test(f.name) && /yes|true|1/i.test(String(f.value))
+  );
+  const result = {
     id: p.id,
     name: p.name,
     price: p.price,
     inStock: inStock(p),
     url: absoluteUrl(await storeBaseUrl(ctx), p.custom_url?.url),
-    description: String(p.description ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 1200),
+    description: String(p.description ?? "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim(),
+    images,
+    videos,
+    notForExport: isNotForExport,
+    ...(isNotForExport
+      ? {
+          shippingRestriction:
+            "NOT FOR EXPORT: This item is restricted to domestic US shipping only and CANNOT be exported or shipped outside the United States under US export regulations.",
+        }
+      : {}),
     variants: (p.variants ?? []).map((v) => ({
       id: v.id,
       sku: v.sku,
@@ -947,10 +1316,88 @@ async function getProductDetails(bc, input, ctx) {
       inventoryLevel: v.inventory_level,
       options: (v.option_values ?? []).map((o) => `${o.option_display_name}: ${o.label}`),
     })),
+  };
+  
+  if (tabContent) result.productTabs = tabContent;
+  if (configSummary) {
+    result.configurator = formatFullSummary(configSummary);
+    result.configuratorNote =
+      " Options differ by gun model and color: each step's bracketed label shows which gun/color it applies to. If the shopper hasn't said which gun they have, ask first, and only list options from steps that match it. Never merge options from different gun labels. Do not state a base price; say 'Save $X when bundled' wording is a bundle discount, not a flat price.";
+  }
+  result.qaNote = "For compatibility, fitment, accessory, specs, weight, material or 'does it work with X' questions, call search_product_qa with this product_id. The store's Q&A answers and the fit chart in productTabs OVERRIDE the description and catalog.";
+  return JSON.stringify(result);
+}
+
+async function searchProductQAtool(input, ctx) {
+  const id = Number(input.product_id);
+  if (!id) return JSON.stringify({ error: "product_id is required." });
+  const query = input.query || "";
+  const limit = input.limit ? Number(input.limit) : undefined;
+  const [qa, tabs] = await Promise.all([
+    searchProductQA(ctx.store, id, query, limit, ctx.logger),
+    searchProductTabs(ctx.store, id, query, ctx.logger),
+  ]);
+  if (!qa.results.length && !tabs.length) {
+    return JSON.stringify({ results: [], ...(qa.note ? { note: qa.note } : {}) });
+  }
+  return JSON.stringify({
+    qa_pairs: qa.results.map((r) => ({ q: r.question, a: (r.answers || []).join(" ") })),
+    fit_chart_and_tabs: tabs,
+    guidance: "AUTHORITATIVE SOURCE. The store's own answers, specs tab, and product tabs OVERRIDE the catalog listing and description. Q&A pairs are newest first. If answers conflict, lead with the newest, but also state any condition or workaround from the others (e.g. 'works with X only after removing the shroud'). Fit-chart and specs lines are the official details: report weights, materials, and model compatibilities directly. Do NOT call search_products to verify or second-guess this.",
   });
 }
 
-// --- cart helpers: one BigCommerce cart per chat session (stored in chatCart) ---
+async function searchProductConfiguratorTool(input, ctx) {
+  const id = Number(input.product_id);
+  if (!id) return JSON.stringify({ error: "product_id is required." });
+  const configured = await hasConfigurator(ctx, id);
+  if (configured === null) {
+    return JSON.stringify({
+      error: "The configurator couldn't be checked right now. Do NOT retry. Apologize briefly and suggest the shopper try again in a moment, or offer a human handoff.",
+    });
+  }
+  if (!configured) {
+    return JSON.stringify({
+      configurator: false,
+      note: "This product has no published configurator. Do NOT look for one on this product again. If the shopper named a model (for example '20/20N'), call search_products with that exact name to find the right product id; otherwise use get_product_details or search_product_qa for this product.",
+    });
+  }
+  const result = await searchProductConfigurator(
+    ctx.store,
+    id,
+    input.query || "",
+    ctx.logger
+  );
+  return JSON.stringify(
+    result ?? { note: "No configurator match for that query. Try an empty query to list all steps, or offer a human handoff." }
+  );
+}
+
+async function searchUgcTool(input, ctx) {
+  const id = input.productId || input.product_id;
+  if (!id) return JSON.stringify({ error: "product_id is required." });
+  const { results, note } = await searchUgcMedia(ctx.store, id, input.query || "", ctx.logger);
+  if (!results.length) {
+    return JSON.stringify({ results: [], ...(note ? { note } : {}) });
+  }
+  return JSON.stringify({
+    results: results.map((m) => {
+      const safeUrl = encodeURI(m.url);
+      return {
+        type: m.type,
+        url: safeUrl,
+        caption: m.caption || "",
+        display: m.type === "photo"
+          ? `![${m.caption || "Customer photo"}](${safeUrl})`
+          : `[Customer video](${safeUrl})`,
+      };
+    }),
+    instruction:
+      "You MUST paste each 'display' value into your reply exactly as-is, with the full URL. " +
+      "Do NOT write '!IMG' or any shorthand. Do NOT reformat. " +
+      "Example reply: 'Here is a customer photo:\\n\\n![Customer photo](https://cdn.example.com/photo.jpg)\\n\\nThis shows the product in real life.'",
+  });
+}
 
 async function findSessionCartRecord(ctx) {
   if (!ctx.sessionId || !ctx.api) return null;
@@ -964,8 +1411,6 @@ async function findSessionCartRecord(ctx) {
 async function currentCartId(bc, ctx) {
   const rec = await findSessionCartRecord(ctx);
   if (!rec || !rec.cartId) return null;
-  // Carts expire / convert to orders — verify it still exists. Only a 404 means
-  // "gone"; other failures (auth, outages) propagate so they aren't reported as an empty cart.
   const existing = await getCart(bc, rec.cartId);
   return existing && existing.id ? rec.cartId : null;
 }
@@ -1001,13 +1446,11 @@ async function addToCart(bc, input, ctx) {
   const quantity = Math.max(1, Number(input.quantity) || 1);
   const lineItem = { product_id: productId, quantity };
   if (input.variant_id) lineItem.variant_id = Number(input.variant_id);
-
-  // Add to the existing session cart if there is one, else create a new cart.
   let cartId = await currentCartId(bc, ctx);
   let cart = null;
   if (cartId) {
     cart = await bc.v3.post(`/carts/${cartId}/items`, { body: { line_items: [lineItem] } }).catch(() => null);
-    if (!cart || !cart.id) cartId = null; // stale — recreate below
+    if (!cart || !cart.id) cartId = null;
   }
   if (!cartId) {
     cart = await bc.v3.post("/carts", { body: { line_items: [lineItem] } });
@@ -1015,7 +1458,6 @@ async function addToCart(bc, input, ctx) {
     cartId = cart.id;
     await rememberCart(ctx, cartId);
   }
-
   const urls = await cartRedirectUrls(bc, cartId);
   return JSON.stringify({ added: true, quantity, cart_url: urls.cart_url, checkout_url: urls.checkout_url });
 }
@@ -1025,7 +1467,6 @@ async function viewCart(bc, ctx) {
   if (!cartId) return JSON.stringify({ empty: true, note: "The shopper's cart is empty." });
   const cart = await getCart(bc, cartId);
   if (!cart || !cart.id) return JSON.stringify({ empty: true, note: "The shopper's cart is empty." });
-
   const items = cartItems(cart).map((i) => ({
     item_id: i.id,
     name: i.name,
@@ -1050,12 +1491,10 @@ async function updateCartItem(bc, input, ctx) {
   const quantity = Math.floor(Number(input.quantity));
   if (!input.item_id || !(quantity >= 0)) return JSON.stringify({ error: "item_id and a quantity of 0 or more are required." });
   if (quantity === 0) return removeFromCart(bc, input, ctx);
-
   const cartId = await currentCartId(bc, ctx);
   if (!cartId) return JSON.stringify({ error: "The shopper's cart is empty." });
   const item = cartItems(await getCart(bc, cartId)).find((i) => i.id === String(input.item_id));
   if (!item) return JSON.stringify({ error: "No item with that item_id in the cart. Call view_cart for the current ids." });
-
   const lineItem = { product_id: item.product_id, quantity };
   if (item.variant_id) lineItem.variant_id = item.variant_id;
   try {
@@ -1075,18 +1514,15 @@ async function removeFromCart(bc, input, ctx) {
   if (!cartId) return JSON.stringify({ error: "The shopper's cart is empty." });
   const item = cartItems(await getCart(bc, cartId)).find((i) => i.id === String(input.item_id));
   if (!item) return JSON.stringify({ error: "No item with that item_id in the cart. Call view_cart for the current ids." });
-  // Removing the last item deletes the cart; viewCart then reports it empty.
   await bc.v3.delete(`/carts/${cartId}/items/${item.id}`);
   return JSON.stringify({ removed: item.name, ...JSON.parse(await viewCart(bc, ctx)) });
 }
 
-// The cart id doubles as the checkout id, so coupons go on /checkouts/{cartId}.
 async function applyCoupon(bc, input, ctx) {
   const code = String(input.coupon_code || "").trim();
   if (!code) return JSON.stringify({ error: "coupon_code is required." });
   const cartId = await currentCartId(bc, ctx);
   if (!cartId) return JSON.stringify({ error: "The cart is empty. Add an item first, then apply the coupon." });
-
   let checkout;
   try {
     checkout = await bc.v3.post(`/checkouts/${cartId}/coupons`, { body: { coupon_code: code } });
@@ -1115,15 +1551,12 @@ async function applyCoupon(bc, input, ctx) {
   });
 }
 
-// Quotes come from a throwaway cart, so the shopper's real checkout never gets
-// a placeholder shipping address attached.
 async function getShippingEstimate(bc, input, ctx) {
   const country = String(input.country_code || "").trim().toUpperCase();
   const postal = String(input.postal_code || "").trim();
   if (!/^[A-Z]{2}$/.test(country) || !postal) {
     return JSON.stringify({ error: "A 2-letter country_code and a postal_code are required." });
   }
-
   let lineItems;
   if (Number(input.product_id) > 0) {
     const li = { product_id: Number(input.product_id), quantity: Math.max(1, Number(input.quantity) || 1) };
@@ -1143,7 +1576,6 @@ async function getShippingEstimate(bc, input, ctx) {
       });
     }
   }
-
   let temp;
   try {
     temp = await bc.v3.post("/carts", { body: { line_items: lineItems } });
@@ -1152,7 +1584,6 @@ async function getShippingEstimate(bc, input, ctx) {
     throw err;
   }
   if (!temp?.id) return JSON.stringify({ error: "Couldn't prepare a shipping quote." });
-
   try {
     const physical = temp.line_items?.physical_items || [];
     if (!physical.length) return JSON.stringify({ note: "These items don't need shipping." });
@@ -1191,7 +1622,7 @@ async function getShippingEstimate(bc, input, ctx) {
         : { options: [], note: "No shipping methods are available to that address." }
     );
   } finally {
-    await bc.v3.delete(`/carts/${temp.id}`).catch(() => {});
+    await bc.v3.delete(`/carts/${temp.id}`).catch(() => { });
   }
 }
 
@@ -1211,7 +1642,6 @@ async function getPromotions(bc) {
   return JSON.stringify(out.length ? { promotions: out } : { promotions: [], note: "No active promotions right now." });
 }
 
-// A missing product comes back as a thrown 404 — return null instead.
 async function getProduct(bc, id, query) {
   try {
     return await bc.v3.get(`/catalog/products/${id}`, { query });
@@ -1229,8 +1659,6 @@ async function getRelatedProducts(bc, input, ctx) {
   const limit = Math.min(Math.max(Number(input.limit) || 4, 1), 8);
   const p = await getProduct(bc, id);
   if (!p) return JSON.stringify({ error: "No product found with that id." });
-
-  // related_products is [-1] when the store lets BigCommerce pick automatically.
   const ids = (p.related_products || []).filter((x) => x > 0 && x !== id).slice(0, limit);
   let products = [];
   if (ids.length) {
@@ -1255,14 +1683,12 @@ async function compareProducts(bc, input, ctx) {
   const products =
     (await bc.v3.get("/catalog/products", { query: { "id:in": ids.join(","), include: "custom_fields", limit: ids.length } })) || [];
   if (!products.length) return JSON.stringify({ error: "None of those product ids were found." });
-
   const brandIds = [...new Set(products.map((p) => p.brand_id).filter((x) => x > 0))];
   const brands = brandIds.length
     ? (await bc.v3.get("/catalog/brands", { query: { "id:in": brandIds.join(",") } }).catch(() => [])) || []
     : [];
   const brandName = new Map(brands.map((b) => [b.id, b.name]));
   const base = await storeBaseUrl(ctx);
-
   return JSON.stringify({
     products: products.map((p) => ({
       id: p.id,
@@ -1322,9 +1748,6 @@ async function getProductReviews(bc, input) {
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const HANDOFF_COOLDOWN_MS = 10 * 60 * 1000;
 
-// Flags the conversation for the admin Conversations tab and notifies the store:
-// a CRM ticket or an email (handoff address, else the store's admin email) per
-// the store's handoff destination, plus an optional Slack-compatible webhook.
 async function escalateToHuman(input, ctx) {
   const email = String(input.contact_email || "").trim();
   const summary = String(input.summary || "").trim().slice(0, 2000);
@@ -1332,28 +1755,23 @@ async function escalateToHuman(input, ctx) {
   if (!ctx.api || !ctx.store || !ctx.sessionId) {
     return JSON.stringify({ delivered: false, note: "Handoff isn't available right now. Apologize and share the store's support contact if asked." });
   }
-
   const prev = await findSession(ctx.api, ctx.store.id, ctx.sessionId);
-  // Don't re-notify the team if this chat was just escalated.
   if (prev?.needsHuman && prev.handoffAt && Date.now() - new Date(prev.handoffAt).getTime() < HANDOFF_COOLDOWN_MS) {
     return JSON.stringify({ delivered: true, note: "The team was already notified about this chat. Reassure the shopper they'll hear back by email." });
   }
   const fields = { needsHuman: true, handoffEmail: email, handoffSummary: summary, handoffAt: new Date() };
   if (prev) await ctx.api.internal.chatSession.update(prev.id, fields);
   else await ctx.api.internal.chatSession.create({ sessionId: ctx.sessionId, storeId: ctx.store.id, preview: summary.slice(0, 140), messageCount: 0, ...fields });
-
   const info = await storeInfo(ctx);
   const text = `Chat handoff requested${info.name ? ` on ${info.name}` : ""}\nShopper: ${email}\nSummary: ${summary}\nSession: ${ctx.sessionId}`;
   let notified = 0;
-
-  // Destination "crm": open a ticket in the connected CRM; fall back to email if that fails.
   let ticketed = false;
   if (ctx.store.handoffDestination === "crm" && freshdeskConnected(ctx.store)) {
     try {
       const ticketId = await createFreshdeskTicket(ctx.store, {
         email,
         subject: `Chat handoff: ${summary.slice(0, 80)}`,
-        description: escapeHtml(`${text}\n\nThe full transcript is in the chatbot app's Conversations tab.`).replace(/\n/g, "<br>"),
+        description: escapeHtml(`${text}\n\nThe full transcript is in the chatbot app's Conversations tab.`).replace(/\n/g, "\n"),
       });
       ticketed = true;
       notified++;
@@ -1363,7 +1781,6 @@ async function escalateToHuman(input, ctx) {
       ctx.logger?.error({ err }, "handoff ticket failed; falling back to email");
     }
   }
-
   const to = (ctx.store.handoffEmail || "").trim() || info.adminEmail;
   if (!ticketed && to && ctx.emails) {
     try {
@@ -1400,26 +1817,18 @@ async function escalateToHuman(input, ctx) {
 const LOCKED_REPLY =
   "Order lookup is temporarily locked for this chat after several unsuccessful attempts. Tell the shopper to open a support ticket (offer escalate_to_human) so a person can help; don't retry.";
 
-// Verify-only: the model submits order # + email and gets back verified or not,
-// plus only the allowlisted fields (status, ship date, carrier, tracking link).
-// Address, payment, amounts, phone and items are never passed to the model.
 async function lookupOrder(bc, input, ctx) {
   const id = Number(input.order_id);
   const email = String(input.email || "").trim().toLowerCase();
   if (!id || !email) return JSON.stringify({ error: "Both order_id and email are required." });
-
   const { api, store, sessionId, ip, safeguards } = ctx;
   if (await lockedOut(ctx)) return JSON.stringify({ found: false, locked: true, reason: LOCKED_REPLY });
-
-  // A missing order comes back as a thrown 404 — treat it as not-found, not a failure.
   let order = null;
   try {
     order = await bc.v2.get(`/orders/${id}`);
   } catch (err) {
     if (!isNotFound(err)) throw err;
   }
-  // Identity gate. The reply is identical whether or not the order exists, so
-  // order numbers can't be enumerated.
   const billingEmail = String(order?.billing_address?.email ?? "").trim().toLowerCase();
   if (!order || !order.id || !billingEmail || billingEmail !== email) {
     await logSafety(api, { storeId: store.id, sessionId, ip, kind: "verify_fail", detail: `order ${id}` });
@@ -1438,7 +1847,6 @@ async function lookupOrder(bc, input, ctx) {
       reason: "No order matches that order number and email. Ask the shopper to double-check both.",
     });
   }
-
   const allow = safeguards.orderFields;
   const shipments = allow.shipDate || allow.carrier || allow.trackingLink
     ? (await bc.v2.get(`/orders/${id}/shipments`).catch(() => [])) || []
@@ -1455,7 +1863,6 @@ async function lookupOrder(bc, input, ctx) {
   return JSON.stringify(result);
 }
 
-// Active lockout for this visitor OR this IP.
 async function lockedOut({ api, store, sessionId, ip }) {
   const who = [sessionId && { sessionId: { equals: sessionId } }, ip && { ip: { equals: ip } }].filter(Boolean);
   if (!who.length) return false;
@@ -1479,4 +1886,11 @@ function searchFaq(query, faq) {
     .slice(0, 3)
     .map((x) => x.s);
   return scored.length ? scored.join("\n\n") : "No matching policy section. If it's not covered, offer a human handoff.";
+}
+
+function scrub(s) {
+  return String(s || "")
+    .replace(/[^\s@]+@[^\s@]+\.[^\s@]+/g, "[email]")
+    .replace(/\+?\d[\d\s().-]{8,}\d/g, "[number]")
+    .replace(/\b(order|ticket)\s*#?\s*\d{3,}/gi, "$1 [number]");
 }
