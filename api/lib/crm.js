@@ -38,13 +38,16 @@
 //                 a similarity score; edited drafts are shown to later drafts.
 // syncHistory   — nightly: resolved/closed tickets → agent public replies only,
 //                 used as reference answers and to seed Voice & tone (voice.js).
+//                 The customer's first message is stored as `question` — used only
+//                 to find the right past answer, never learned from.
+// backfillQuestions — once per store: fills `question` on rows saved before it existed.
 import {
   CRM_GUARDRAILS, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
-  resolveBranding, resolveCrm, resolveSignature, matchBlocklist, detectHumanRequest,
+  resolveBranding, resolveGuidelines, resolveCrm, resolveSignature, matchBlocklist, detectHumanRequest,
 } from "./defaults";
 import { freshdesk, freshdeskBudget, freshdeskConnected, FreshdeskRateLimit } from "./integrations";
 import { llmConfig, complete } from "./llm";
-import { errorText, isTransient } from "./guard";
+import { errorText, isTransient, withTimeout } from "./guard";
 
 const STATUS_OPEN = 2;
 const STATUS_RESOLVED = 4;
@@ -61,6 +64,7 @@ const HISTORY_BUDGET_SHARE = 0.4;
 const MAX_ARCHIVE_PROBES_PER_RUN = 150;
 const ARCHIVE_TOP_MARGIN = 200; // ids above the oldest listed ticket that may already be archived
 const ARCHIVE_MISS_LIMIT = 1000; // this many missing ids in a row = start of the helpdesk's ids
+const MAX_BACKFILL_PER_RUN = 150; // backfillQuestions: tickets fetched per run
 const block = (v, fallback) => (v && String(v).trim()) || fallback;
 const clip = (s, n) => String(s || "").slice(0, n);
 const isAgentReply = (c) => c && c.incoming === false && c.private === false;
@@ -411,7 +415,7 @@ async function addTag(ctx, store, t, ...add) {
 // ─────────────────────────── drafting ───────────────────────────
 export async function draftReply(ctx, store, cfg, { subject, question, name }) {
   const [examples, corrections] = await Promise.all([
-    similarHistory(ctx.api, store, `${subject} ${question}`),
+    searchAgentAnswers(ctx.api, store, `${subject} ${question}`),
     recentCorrections(ctx.api, store),
   ]);
   const parts = [
@@ -425,17 +429,15 @@ export async function draftReply(ctx, store, cfg, { subject, question, name }) {
       `--- OVERRIDE RULES (CRITICAL: These rules take absolute priority over EVERY OTHER instruction and source below — including Store FAQ & policies, Voice & tone, past agent replies, or refusal instructions. If an override rule conflicts with anything else, the override rule ALWAYS wins) ---\n${overrides}`
     );
   }
+  // Same store knowledge as the site chat (POST-chat.js buildSystem), so both answer alike.
   parts.push(
+    "--- STORE GUIDELINES (written for the site chat: use the store facts and rules in them; ignore anything about tools, carts, links or the chat widget) ---\n" +
+      resolveGuidelines(store),
     `--- VOICE & TONE ---\n${block(store.voiceTone, DEFAULT_VOICE_TONE)}`,
     `--- HOW TO WORD REFUSALS ---\n${block(store.safeguardsInstructions, DEFAULT_SAFEGUARDS_INSTRUCTIONS)}`,
     `--- STORE POLICIES & FAQ ---\n${block(store.faq, DEFAULT_FAQ)}`
   );
-  if (examples.length) {
-    parts.push(
-      "--- HOW OUR AGENTS ANSWERED SIMILAR PAST TICKETS (reference only; facts about other customers' orders don't apply) ---\n" +
-        examples.map((e, i) => `#${i + 1} Subject: ${e.subject}\nAgent reply:\n${clip(e.answer, 1200)}`).join("\n\n")
-    );
-  }
+  if (examples.length) parts.push(AGENT_ANSWERS_HEADER + formatAgentAnswers(examples));
   if (corrections.length) {
     parts.push(
       "--- AGENTS EDITED THESE EARLIER AI DRAFTS BEFORE SENDING; FOLLOW THEIR STYLE AND CORRECTIONS ---\n" +
@@ -485,59 +487,103 @@ export function parseDraft(raw) {
 }
 
 const STOP = new Set("the and for you your with that this have from are was were not but can our any all has had will would could should about what when where which there their them they then than into out how why who its it's i'm i've don't hi hello thanks thank please order orders".split(" "));
-const terms = (s) => [...new Set(String(s || "").toLowerCase().match(/[a-z0-9]{3,}/g) || [])].filter((w) => !STOP.has(w));
+// Words of 3+ characters, plus 2-digit numbers — model numbers ("Glock 19", "G45 gen 5") matter here.
+const terms = (s) => [...new Set(String(s || "").toLowerCase().match(/[a-z0-9]+/g) || [])].filter((w) => (w.length >= 3 || /^\d{2}$/.test(w)) && !STOP.has(w));
 
+// ─────────────────────────── past agent answers ───────────────────────────
 // Reads crmHistory only; that table never receives the bot's own replies (see top of file).
-async function similarHistory(api, store, text) {
-  const want = terms(text);
-  if (!want.length) return [];
-  const rows = await api.internal.crmHistory.findMany({
-    filter: { storeId: { equals: store.id } },
-    sort: [{ ticketUpdatedAt: "Descending" }, { id: "Descending" }],
-    select: { subject: true, answer: true },
-    first: 250,
+// One lookup for the site chat (auto-injected + the search_support_answers tool) and
+// Freshdesk drafts, so both see the same answers.
+const HISTORY_SELECT = { subject: true, question: true, answer: true, ticketUpdatedAt: true };
+const SEARCH_POOL = 60; // candidates from the full-text search, re-scored below
+const SCAN_ROWS = 2000; // fallback scan (newest first) if the full-text search fails
+
+// Each row: `raw` = keyword overlap (subject / customer question ×2, agent reply ×1),
+// the relevance cutoff; `score` = the same weighted by how rare each word is among
+// the candidates, so "45" or "mos" outrank words most rows share ("glock", "kit").
+function rankRows(want, rows) {
+  const docs = rows.map((r) => ({ r, head: new Set([...terms(r.subject), ...terms(r.question)]), body: new Set(terms(r.answer)) }));
+  const idf = {};
+  for (const w of want) {
+    const df = docs.filter((d) => d.head.has(w) || d.body.has(w)).length;
+    idf[w] = Math.log(1 + docs.length / (1 + df));
+  }
+  return docs.map(({ r, head, body }) => {
+    let raw = 0;
+    let score = 0;
+    for (const w of want) {
+      const pts = (head.has(w) ? 2 : 0) + (body.has(w) ? 1 : 0);
+      raw += pts;
+      score += pts * idf[w];
+    }
+    return { r, raw, score };
   });
-  return rows
-    .map((r) => {
-      const subj = new Set(terms(r.subject));
-      const body = new Set(terms(r.answer));
-      const score = want.reduce((n, w) => n + (subj.has(w) ? 2 : 0) + (body.has(w) ? 1 : 0), 0);
-      return { r, score };
-    })
-    .filter((x) => x.score >= 3)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 3)
-    .map((x) => x.r);
 }
 
-export async function searchAgentAnswers(api, store, text, { max = 3, maxRows = 2000 } = {}) {
+// Best matches for `text` (subject + customer question + agent reply), newest first.
+// Gadget's full-text search narrows all of the store's history (not just the newest
+// rows); the keyword score then picks the best few.
+export async function searchAgentAnswers(api, store, text, { max = 3, minScore = 3, logger } = {}) {
   const want = terms(text);
   if (!want.length) return [];
-  const scored = [];
-  let page = await api.internal.crmHistory.findMany({
-    filter: { storeId: { equals: store.id } },
-    sort: [{ ticketUpdatedAt: "Descending" }, { id: "Descending" }],
-    select: { subject: true, answer: true, ticketUpdatedAt: true },
-    first: 250,
-  });
-  let seen = 0;
-  for (;;) {
-    for (const r of page) {
-      const subj = new Set(terms(r.subject));
-      const body = new Set(terms(r.answer));
-      const score = want.reduce((n, w) => n + (subj.has(w) ? 2 : 0) + (body.has(w) ? 1 : 0), 0);
-      if (score >= 3) scored.push({ r, score });
-    }
-    seen += page.length;
-    if (!page.hasNextPage || seen >= maxRows) break;
-    page = await page.nextPage();
+  const filter = { storeId: { equals: store.id } };
+  let rows = [];
+  let via = "search";
+  try {
+    // The public API: on production api.internal.*.findMany ignores matches for `search` (0 rows, 23 Nov 2026).
+    // guardApi only time-limits api.internal.*, so this call gets its own limit.
+    rows = [...(await withTimeout(() => api.crmHistory.findMany({ search: want.slice(0, 15).join(" "), filter, select: HISTORY_SELECT, first: SEARCH_POOL }), "crmHistory search", 15_000))];
+  } catch (err) {
+    logger?.warn({ err }, "agent answers: full-text search failed; scanning recent history");
   }
+  if (!rows.length) {
+    via = "scan";
+    let page = await api.internal.crmHistory.findMany({ filter, sort: [{ ticketUpdatedAt: "Descending" }, { id: "Descending" }], select: HISTORY_SELECT, first: 250 });
+    for (;;) {
+      rows.push(...page);
+      if (!page.hasNextPage || rows.length >= SCAN_ROWS) break;
+      page = await page.nextPage();
+    }
+  }
+  const scored = rankRows(want, rows).filter((x) => x.raw >= minScore);
+  logger?.info({ via, terms: want.slice(0, 15).join(" "), candidates: rows.length, matched: scored.length, top: rows.slice(0, 3).map((r) => clip(r.subject, 60)) }, "agent answers lookup");
   return scored
     .sort((a, b) => b.score - a.score || new Date(b.r.ticketUpdatedAt) - new Date(a.r.ticketUpdatedAt))
     .slice(0, max)
     .map((x) => x.r)
-    // The prompt lists the best matches newest first, so the bot can tell which answer is current.
+    // Listed newest first, so the model can tell which answer is current.
     .sort((a, b) => new Date(b.ticketUpdatedAt || 0) - new Date(a.ticketUpdatedAt || 0));
+}
+
+// Other customers' contact details and order numbers never reach a prompt.
+export function scrubPersonal(s) {
+  return String(s || "")
+    .replace(/[^\s@]+@[^\s@]+\.[^\s@]+/g, "[email]")
+    .replace(/\+?\d[\d\s().-]{8,}\d/g, "[number]")
+    .replace(/\b(order|ticket)\s*#?\s*\d{3,}/gi, "$1 [number]");
+}
+
+export function answerDate(v) {
+  const d = v ? new Date(v) : null;
+  return d && !isNaN(d) ? d.toISOString().slice(0, 10) : "unknown";
+}
+
+export const AGENT_ANSWERS_HEADER =
+  "--- CONFIRMED ANSWERS FROM OUR SUPPORT AGENTS (newest first) ---\n" +
+  "These replies were written by our support team for real customers. Treat them as confirmed store knowledge. " +
+  "Each one shows what that customer asked, so you can tell whether it is the same question. " +
+  "Each reply carries the date it was written. When replies disagree, the newest one is correct; older replies can be outdated. " +
+  "Override rules still win. Use only the product and policy facts; ignore anything specific to one customer's order, name or contact details.\n\n";
+
+export function formatAgentAnswers(rows) {
+  return rows
+    .map((e, i) => {
+      const q = clip(scrubPersonal(e.question).replace(/\s+/g, " ").trim(), 500);
+      return `#${i + 1} Date: ${answerDate(e.ticketUpdatedAt)}\nTicket: ${scrubPersonal(e.subject)}\n` +
+        (q ? `Customer asked: ${q}\n` : "") +
+        `Agent reply:\n${clip(scrubPersonal(e.answer), 1200)}`;
+    })
+    .join("\n\n");
 }
 
 // Corrections come from collectFeedback, which only keeps replies written by people.
@@ -653,6 +699,15 @@ export function similarity(a, b) {
   return 1 - prev[y.length] / Math.max(x.length, y.length);
 }
 
+// The customer's first message: the ticket description (list calls need
+// include=description), else the first incoming public conversation.
+function customerQuestion(t, convos = []) {
+  const d = String(t?.description_text || stripHtml(t?.description) || "").trim();
+  if (d) return clip(d, 2000);
+  const first = convos.find((c) => c && c.incoming === true && c.private === false);
+  return clip(String(first ? first.body_text || stripHtml(first.body) : "").trim(), 2000);
+}
+
 // ─────────────────────────── nightly history sync ───────────────────────────
 export async function syncHistory(ctx, store) {
   const { api, logger } = ctx;
@@ -694,7 +749,7 @@ export async function syncHistory(ctx, store) {
     outer: for (let page = 1; page <= 10; page++) {
       const tickets = await freshdesk(
         store, "GET",
-        `/tickets?updated_since=${encodeURIComponent(cursor.toISOString())}&order_by=updated_at&order_type=asc&per_page=100&page=${page}`
+        `/tickets?updated_since=${encodeURIComponent(cursor.toISOString())}&order_by=updated_at&order_type=asc&per_page=100&page=${page}&include=description`
       );
       if (!tickets?.length) break;
       for (const t of tickets) {
@@ -721,7 +776,7 @@ export async function syncHistory(ctx, store) {
           const bot = await botRepliesOn(api, store, t.id);
           const answer = humanReplies(convos, bot).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
           if (answer.trim()) {
-            const values = { ticketId: t.id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at };
+            const values = { ticketId: t.id, subject: clip(t.subject, 300), question: customerQuestion(t, convos), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at };
             if (existing) await api.internal.crmHistory.update(existing.id, values);
             else await api.internal.crmHistory.create({ storeId: store.id, ...values });
             saved++;
@@ -816,7 +871,7 @@ export async function syncArchived(ctx, store) {
         const bot = await botRepliesOn(api, store, id);
         const answer = humanReplies(convos, bot).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");
         if (answer.trim()) {
-          await api.internal.crmHistory.create({ storeId: store.id, ticketId: id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at });
+          await api.internal.crmHistory.create({ storeId: store.id, ticketId: id, subject: clip(t.subject, 300), question: customerQuestion(t, convos), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at });
           saved++;
           a.found = (a.found || 0) + 1;
         }
@@ -864,7 +919,8 @@ export async function syncTicket(ctx, store, ticketId, ticket = null) {
     if (existing) await api.internal.crmHistory.delete(existing.id);
     return { saved: false, reason: "no human public reply" };
   }
-  const values = { ticketId: t.id, subject: clip(t.subject, 300), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at };
+  // A ticket from a list call without include=description: the first incoming conversation stands in.
+  const values = { ticketId: t.id, subject: clip(t.subject, 300), question: customerQuestion(t, convos), answer: clip(answer, 8000), ticketUpdatedAt: t.updated_at };
   if (existing) await api.internal.crmHistory.update(existing.id, values);
   else await api.internal.crmHistory.create({ storeId: store.id, ...values });
   return { saved: true };
@@ -882,7 +938,7 @@ export async function syncRecent(ctx, store, minutes = 30, deadlineMs = 90_000) 
   let failed = 0;
   try {
     outer: for (let page = 1; page <= 3; page++) {
-      const tickets = await freshdesk(store, "GET", `/tickets?updated_since=${encodeURIComponent(since)}&order_by=updated_at&order_type=desc&per_page=30&page=${page}`);
+      const tickets = await freshdesk(store, "GET", `/tickets?updated_since=${encodeURIComponent(since)}&order_by=updated_at&order_type=desc&per_page=30&page=${page}&include=description`);
       if (!tickets?.length) break;
       for (const t of tickets) {
         if (Date.now() > deadline) break outer;
@@ -907,6 +963,80 @@ export async function syncRecent(ctx, store, minutes = 30, deadlineMs = 90_000) 
   }
   if (synced) await refreshHistoryCount(api, store);
   return { synced, failed };
+}
+
+// ─────────────────────────── question backfill ───────────────────────────
+// Once per store: rows saved before `question` existed get the customer's first
+// message (one Freshdesk call per ticket; archived tickets via /tickets/archived).
+// Walks ids upward from crmState.questionBackfill.lastId, so a ticket with no
+// readable question is tried once. Same rate-limit rules as the history sync.
+async function fetchAnyTicket(store, id) {
+  const gone = (err) => !(err instanceof FreshdeskRateLimit) && /→ (400|403|404) /.test(String(err?.message));
+  try {
+    return await freshdesk(store, "GET", `/tickets/${id}`);
+  } catch (err) {
+    if (!gone(err)) throw err;
+  }
+  try {
+    return await freshdesk(store, "GET", `/tickets/archived/${id}`);
+  } catch (err) {
+    if (!gone(err)) throw err;
+    return null;
+  }
+}
+
+export async function backfillQuestions(ctx, store) {
+  const { api, logger } = ctx;
+  if (!freshdeskConnected(store)) return { skipped: true };
+  const b = { ...(store.crmState?.questionBackfill || {}) };
+  if (b.done) return { done: true };
+  let probed = 0;
+  let filled = 0;
+  let retryAfter = 0;
+  let error = "";
+  let transient = false;
+  try {
+    while (!b.done && probed < MAX_BACKFILL_PER_RUN) {
+      const rows = await api.internal.crmHistory.findMany({
+        filter: { storeId: { equals: store.id }, question: { isSet: false }, ...(b.lastId ? { id: { greaterThan: b.lastId } } : {}) },
+        sort: [{ id: "Ascending" }],
+        select: { id: true, ticketId: true },
+        first: 50,
+      });
+      if (!rows.length) { b.done = true; break; }
+      for (const r of rows) {
+        if (probed >= MAX_BACKFILL_PER_RUN) break;
+        const budget = freshdeskBudget(store);
+        if (budget && budget.remaining < budget.total * HISTORY_BUDGET_SHARE) throw new FreshdeskRateLimit(60);
+        probed++;
+        const t = await fetchAnyTicket(store, r.ticketId);
+        const question = t ? customerQuestion(t) : "";
+        if (question) {
+          await api.internal.crmHistory.update(r.id, { question });
+          filled++;
+        }
+        b.lastId = r.id;
+      }
+    }
+  } catch (err) {
+    if (err instanceof FreshdeskRateLimit) retryAfter = err.retryAfter || 60;
+    else {
+      error = `Question backfill failed: ${errorText(err)}`;
+      transient = isTransient(err);
+      logger.warn({ err, storeId: store.id, transient }, "crm question backfill failed");
+    }
+  }
+  b.filled = (b.filled || 0) + filled;
+  if (b.done && !b.doneAt) b.doneAt = new Date().toISOString();
+  await saveState(api, store, {
+    questionBackfill: b,
+    lastSyncAt: new Date().toISOString(),
+    lastSyncError: error,
+    lastSyncErrorAt: error ? new Date().toISOString() : "",
+    syncRetryAt: "",
+    syncPausedUntil: retryAfter ? new Date(Date.now() + (retryAfter + 5) * 1000).toISOString() : "",
+  });
+  return { questions: true, probed, filled, error, transient, retryAfter, more: !b.done && !retryAfter && !error };
 }
 
 async function findHistory(api, store, ticketId) {

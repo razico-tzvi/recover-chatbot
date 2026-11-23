@@ -1,6 +1,6 @@
 import { RouteHandler } from "gadget-server";
 import {
-  GUARDRAILS, DEFAULT_GUIDELINES, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
+  GUARDRAILS, FAQ_MARKER, resolveGuidelines, DEFAULT_FAQ, DEFAULT_VOICE_TONE, DEFAULT_SAFEGUARDS_INSTRUCTIONS,
   resolveBranding, resolveFeatures, resolveSafeguards, enabledTools, tokenCost, PRODUCT_TOOLS,
   resolveCrm, matchBlocklist, mergeTopics, UNANSWERED_RE, questionKey,
 } from "../lib/defaults";
@@ -13,7 +13,7 @@ import {
   formatFullSummary,
 } from "../lib/productConfigurator";
 import { searchUgcMedia } from "../lib/ugc";
-import { searchAgentAnswers } from "../lib/crm";
+import { searchAgentAnswers, formatAgentAnswers, scrubPersonal, answerDate, AGENT_ANSWERS_HEADER } from "../lib/crm";
 import { replyFilter } from "../lib/replyFilter";
 
 /**
@@ -114,17 +114,11 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
   if (!blocked) {
     try {
       const recentUser = messages.filter((m) => m.role === "user").slice(-2).map((m) => String(m.content || "")).join(" ");
-      const answers = await timed(() => searchAgentAnswers(api, store, recentUser), "agent answers lookup", logger);
+      const answers = await timed(() => searchAgentAnswers(api, store, recentUser, { logger }), "agent answers lookup", logger);
       if (answers !== TIMED_OUT && answers.length) {
         logger.info({ sessionId, matches: answers.length }, "chat: agent answers injected");
-        dynamicSystem +=
-          "\n\n--- CONFIRMED ANSWERS FROM OUR SUPPORT AGENTS (newest first) ---\n" +
-          "These replies were written by our support team for real customers. Treat them as confirmed store knowledge. " +
-          "If the product Q&A or fit chart has no match but an answer below covers the question, answer from it and do NOT say you have no confirmed data or send the shopper to support. " +
-          "Each reply carries the date it was written. When replies disagree, the newest one is correct; older replies can be outdated. " +
-          "If a reply conflicts with product Q&A or the fit chart, say what each says and mention the agent's condition. Override rules still win. " +
-          "Use only the product facts; ignore anything specific to one customer's order, name or contact details.\n\n" +
-          answers.map((e, i) => `#${i + 1} Date: ${replyDate(e.ticketUpdatedAt)}\nTicket: ${scrub(e.subject)}\nAgent reply:\n${scrub(e.answer).slice(0, 1200)}`).join("\n\n");
+        const canSearchMore = enabledTools(store).has("search_support_answers");
+        dynamicSystem += "\n\n" + AGENT_ANSWERS_HEADER.trimEnd() + " " + CHAT_AGENT_ANSWERS_NOTE + (canSearchMore ? SEARCH_MORE_NOTE : "") + "\n\n" + formatAgentAnswers(answers);
       }
     } catch (err) {
       logger.warn({ err, sessionId }, "agent answers lookup failed");
@@ -132,6 +126,8 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
   }
 
   const allowed = enabledTools(store);
+  // Past support answers come from the synced Freshdesk history.
+  if (!freshdeskConnected(store)) allowed.delete("search_support_answers");
   const tools = TOOLS.filter((t) => allowed.has(t.function.name));
 
   const write = startStream(request, reply);
@@ -244,6 +240,7 @@ const STATUS_TEXT = {
   get_product_reviews: "Reading reviews…",
   lookup_order: "Looking up your order…",
   search_faq: "Checking store policies…",
+  search_support_answers: "Checking past support answers…",
   escalate_to_human: "Passing this to our team…",
 };
 
@@ -295,14 +292,16 @@ const MAX_ITERATIONS = 6;
 const MAX_TOKENS = 2048;
 const FINAL_ROUND_NUDGE =
   "You've reached the tool limit for this turn. Do not call any more tools. Using only the information the tools already returned, write your complete answer to the shopper's question now. If something is still missing, say so plainly and offer to help further or to hand off to a human.";
-const FAQ_MARKER = "--- STORE POLICIES & FAQ ---";
+// Chat-only addition to AGENT_ANSWERS_HEADER (crm.js), which Freshdesk drafts share.
+const CHAT_AGENT_ANSWERS_NOTE =
+  "If the product Q&A or fit chart has no match but an answer below covers the question, answer from it and do NOT say you have no confirmed data or send the shopper to support. " +
+  "If a reply conflicts with product Q&A or the fit chart, say what each says and mention the agent's condition.";
+const SEARCH_MORE_NOTE = " If none of these answers the shopper's question, you can search more past answers with search_support_answers.";
 const block = (value, fallback) => (value && String(value).trim()) || fallback;
 const storeFaq = (store) => block(store?.faq, DEFAULT_FAQ);
 
 function buildSystem(store, page) {
-  let guidelines = block(store.systemPrompt, DEFAULT_GUIDELINES);
-  const i = guidelines.indexOf(FAQ_MARKER);
-  if (i >= 0) guidelines = guidelines.slice(0, i).trimEnd();
+  const guidelines = resolveGuidelines(store);
   const parts = [
     `Your name is ${resolveBranding(store).botName}.`,
     GUARDRAILS,
@@ -567,6 +566,18 @@ const TOOLS = [
         type: "object",
         properties: { order_id: { type: "number" }, email: { type: "string" } },
         required: ["order_id", "email"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_support_answers",
+      description: "Search the replies our support team wrote to past customer tickets (Freshdesk), with what each customer asked and the date. Use it when the FAQ, product Q&A and product data don't answer the question, or to check how support handled a situation (warranty, returns, exchanges, fitment, shipping problems). Use short keywords (e.g. 'glock 19 gen 5 holster', 'warranty broken clip'). Newest answer wins when they disagree; ignore order numbers, names and other customer-specific details.",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string", description: "Keywords for the question (product, model, problem)." } },
+        required: ["query"],
       },
     },
   },
@@ -1143,6 +1154,8 @@ async function dispatchTool(name, input, ctx) {
       return await lookupOrder(bc, input, ctx);
     case "search_faq":
       return searchFaq(input.query || "", storeFaq(ctx.store));
+    case "search_support_answers":
+      return await searchSupportAnswersTool(input, ctx);
     case "escalate_to_human":
       return await escalateToHuman(input, ctx);
     default:
@@ -1896,14 +1909,19 @@ function searchFaq(query, faq) {
 }
 
 // "2026-11-06" for an agent reply's ticketUpdatedAt; "unknown" when it's missing or invalid.
-function replyDate(v) {
-  const d = v ? new Date(v) : null;
-  return d && !isNaN(d) ? d.toISOString().slice(0, 10) : "unknown";
-}
-
-function scrub(s) {
-  return String(s || "")
-    .replace(/[^\s@]+@[^\s@]+\.[^\s@]+/g, "[email]")
-    .replace(/\+?\d[\d\s().-]{8,}\d/g, "[number]")
-    .replace(/\b(order|ticket)\s*#?\s*\d{3,}/gi, "$1 [number]");
+async function searchSupportAnswersTool(input, ctx) {
+  const query = String(input.query || "").trim();
+  if (!query) return JSON.stringify({ error: "query is required." });
+  const rows = await searchAgentAnswers(ctx.api, ctx.store, query, { max: 5, minScore: 2, logger: ctx.logger });
+  if (!rows.length) return JSON.stringify({ results: [], note: "No past support answer matches. Try other keywords, or answer from the FAQ / product data." });
+  const clean = (v, n) => scrubPersonal(v).replace(/\s+/g, " ").trim().slice(0, n);
+  return JSON.stringify({
+    note: "Written by our support team for other customers. Newest first; when they disagree the newest is correct. Ignore customer-specific details.",
+    results: rows.map((r) => ({
+      date: answerDate(r.ticketUpdatedAt),
+      ticket: clean(r.subject, 200),
+      customer_asked: clean(r.question, 500),
+      agent_reply: scrubPersonal(r.answer).slice(0, 1500),
+    })),
+  });
 }

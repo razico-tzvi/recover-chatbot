@@ -1,5 +1,5 @@
 import { ActionOptions } from "gadget-server";
-import { saveState, storesFor, syncArchived, syncHistory } from "../lib/crm";
+import { backfillQuestions, saveState, storesFor, syncArchived, syncHistory } from "../lib/crm";
 import { errorText, guardApi, isTransient } from "../lib/guard";
 import { seedVoiceTone, VOICE_SEED_REPLIES } from "../lib/voice";
 
@@ -41,8 +41,13 @@ export const run: ActionRun = async ({ params, api: rawApi, logger }) => {
       let r: any;
       try {
         r = await syncHistory(ctx, store);
-        if (!r.skipped && !r.error && !r.retryAfter && !r.more && !(store.crmState as any)?.archive?.done) {
+        const caught = (x: any) => !x.skipped && !x.error && !x.retryAfter && !x.more;
+        if (caught(r) && !(store.crmState as any)?.archive?.done) {
           r = { ...(await syncArchived(ctx, store)), live: r };
+          // Archive finished in this run: go straight on to the question backfill.
+          if (caught(r) && (store.crmState as any)?.archive?.done && !(store.crmState as any)?.questionBackfill?.done) r.more = true;
+        } else if (caught(r) && !(store.crmState as any)?.questionBackfill?.done) {
+          r = { ...(await backfillQuestions(ctx, store)), live: r };
         }
       } catch (err: any) {
         // Thrown outside the batch loop (e.g. saving progress hung): same retry path.

@@ -39,7 +39,7 @@ export async function exportConversations(format: "csv" | "json", filter?: Recor
 // Freshdesk ticket history (agent public replies only), from the nightly sync.
 export async function historyRows() {
   const rows = await fetchAll(api.crmHistory, { sort: { ticketUpdatedAt: "Descending" } }, 50000);
-  return rows.map((r: any) => ({ ticketId: r.ticketId, subject: r.subject || "", agentReply: r.answer || "", ticketUpdatedAt: r.ticketUpdatedAt }));
+  return rows.map((r: any) => ({ ticketId: r.ticketId, subject: r.subject || "", customerQuestion: r.question || "", agentReply: r.answer || "", ticketUpdatedAt: r.ticketUpdatedAt }));
 }
 
 // Learning-mode feedback: each AI draft next to what the agent actually sent.

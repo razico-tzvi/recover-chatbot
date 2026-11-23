@@ -100,6 +100,13 @@ setup (ggt dev + `stencil start` + the script tag in
   action (crmSyncHistory, crmSyncRecent, crmPoll, syncOrders do). A history sync
   that still fails on a timeout retries the batch (`retry` param, up to 5×, 2 min
   apart; Context shows "Retrying" + the error text, then "Sync error").
+- Freshdesk knowledge: `crmHistory` holds subject + customer question + agent
+  replies. `searchAgentAnswers` (`crm.js`, Gadget full-text search + keyword
+  score) is the ONE lookup for the chat's auto-injected answers, the
+  `search_support_answers` chat tool and Freshdesk drafts — keep them on it so
+  chat and ticket answers agree. `draftReply` also gets the General guidelines.
+  Its full-text search must use the public `api.crmHistory.findMany({ search })`:
+  on production `api.internal.*.findMany` returns 0 rows for `search`.
 - `api/lib/voice.js` — Voice & tone (context source 8) generated from the
   agent replies in `crmHistory` (last 12 months): seeded once after a history
   sync while the block is still the default, or on demand via Context ›

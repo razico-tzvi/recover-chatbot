@@ -8,6 +8,8 @@ export const schema: GadgetModel = {
   storageKey: "crmHistory-model",
   fields: {
     answer: { type: "string", storageKey: "crmHistory-answer" },
+    // The customer's first message — used only to find the right past answer.
+    question: { type: "string", storageKey: "crmHistory-question" },
     storeId: { type: "string", storageKey: "crmHistory-storeId" },
     subject: { type: "string", storageKey: "crmHistory-subject" },
     ticketId: { type: "number", storageKey: "crmHistory-ticketId" },

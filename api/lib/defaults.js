@@ -82,6 +82,15 @@ export const DEFAULT_BRANDING = {
     "This is an AI assistant trained to answer questions about our products. If you need a human, just ask and we'll connect you with support.",
 };
 
+// General guidelines as the prompts use them. Old stores pasted the FAQ into the
+// guidelines; anything from the FAQ heading on is dropped (the FAQ has its own block).
+export const FAQ_MARKER = "--- STORE POLICIES & FAQ ---";
+export function resolveGuidelines(store) {
+  const g = (store?.systemPrompt && String(store.systemPrompt).trim()) || DEFAULT_GUIDELINES;
+  const i = g.indexOf(FAQ_MARKER);
+  return i >= 0 ? g.slice(0, i).trimEnd() : g;
+}
+
 const HEX_RE = /^#[0-9a-fA-F]{6}$/;
 
 export function resolveBranding(store) {
@@ -117,6 +126,7 @@ export const FEATURES = [
   { key: "shippingEstimate", group: "Cart & checkout", label: "Shipping estimate", tools: ["get_shipping_estimate"], needs: "Checkouts (modify)" },
   { key: "promotions", group: "Cart & checkout", label: "Current promotions", tools: ["get_promotions"] },
   { key: "orderLookup", group: "Customer service", label: "Order lookup (verify-only)", tools: ["lookup_order"] },
+  { key: "supportAnswers", group: "Customer service", label: "Past support answers (Freshdesk)", tools: ["search_support_answers"], needs: "Freshdesk connected" },
   { key: "handoff", group: "Customer service", label: "Human handoff", tools: ["escalate_to_human"] },
   { key: "vision", group: "Customer service", label: "Image uploads (vision)", tools: [] },
   { key: "closingIncentive", group: "Sales", label: "Closing incentive", tools: [], comingSoon: true },
