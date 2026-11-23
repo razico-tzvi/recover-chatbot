@@ -7,9 +7,16 @@ It never learns from its own replies.
 How it is enforced (api/lib/crm.js):
 - Every public reply the app posts to Freshdesk saves its conversation id in the `botReply` model.
 - Ticket history, Voice & tone seeding and the corrections examples leave those conversations out,
-  whatever the ticket's tags. Tickets tagged ai-answered or ai-blocked are skipped as well.
+  whatever the ticket's tags. Tickets tagged ai-answered or ai-blocked are skipped as well
+  (nightly sync, archived backfill and the 5-minute recent sync alike).
+- A bot draft that our support team sends unchanged is the bot's text: a reply that kept 90% or
+  more of a draft (`APPROVED_SIMILARITY`) stays out of ticket history and Voice & tone.
+  Edited drafts (below 90%) are the agent's words: they count, and they feed the corrections examples.
 - Tags are best effort and are not relied on.
 - If you add a new place that posts a public reply, use postPublicReply().
+- If you add a new place that reads Freshdesk replies for learning, use humanReplies().
+
+
 # BigCommerce AI Customer Chatbot
 
 An AI shopping assistant that chats with customers on behalf of a BigCommerce

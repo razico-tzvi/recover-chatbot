@@ -14,9 +14,15 @@
 //     those conversations out, whatever the ticket's tags. Ticket history
 //     (crmHistory), Voice & tone (voice.js reads crmHistory) and the corrections
 //     examples (recentCorrections) are all fed from those, so they inherit it.
-//   • Tickets tagged ai-answered or ai-blocked are skipped as well, and anything
-//     already stored for them is removed.
-//   • purgeLegacyBotHistory() removes what got in before this rule was enforced.
+//   • A draft our support team sends unchanged is the bot's text (Tzvi, 22 Nov 2026):
+//     an agent reply that kept ≥ APPROVED_SIMILARITY (90%) of a bot draft or set
+//     response on that ticket is left out of ticket history and Voice & tone.
+//     Edited drafts (< 90%) are the agent's words: they count, and they are the
+//     corrections examples.
+//   • Tickets tagged ai-answered or ai-blocked are skipped as well (syncHistory,
+//     syncArchived and syncTicket alike), and anything already stored for them is removed.
+//   • purgeLegacyBotHistory() and purgeApprovedDraftHistory() remove what got in
+//     before these rules were enforced (once per store).
 // If you add a new place that posts a public reply, use postPublicReply().
 // If you add a new place that reads Freshdesk replies for learning, use humanReplies().
 // ══════════════════════════════════════════════════════════════════════════════
@@ -64,28 +70,54 @@ const isAgentReply = (c) => c && c.incoming === false && c.private === false;
 // (botReply model). `unknown` = at least one was recorded without an id (legacy
 // purge, or Freshdesk didn't return one): then no agent reply on that ticket can be
 // told apart from the bot's, so none of them counts.
+// `drafts` = the bot's drafts / set responses on that ticket (crmTicket.draft), each
+// with and without the store signature: an agent reply that kept ≥ APPROVED_SIMILARITY
+// of one of them is the bot's text sent unchanged (Tzvi, 22 Nov 2026), not the agent's.
 export async function botRepliesOn(api, store, ticketId) {
-  const rows = await api.internal.botReply.findMany({
-    filter: { storeId: { equals: store.id }, ticketId: { equals: ticketId } },
-    select: { conversationId: true },
-    first: 250,
-  });
+  const [rows, draftRows] = await Promise.all([
+    api.internal.botReply.findMany({
+      filter: { storeId: { equals: store.id }, ticketId: { equals: ticketId } },
+      select: { conversationId: true },
+      first: 250,
+    }),
+    api.internal.crmTicket.findMany({
+      filter: { storeId: { equals: store.id }, ticketId: { equals: ticketId }, draft: { isSet: true } },
+      select: { draft: true },
+      first: 50,
+    }),
+  ]);
   const list = [...rows];
+  const signature = resolveSignature(store);
+  const drafts = [...draftRows]
+    .map((r) => String(r.draft || "").trim())
+    .filter(Boolean)
+    .flatMap((d) => [d, withSignature(d, signature)]);
   return {
     ids: new Set(list.map((r) => r.conversationId).filter((x) => x != null).map(Number)),
     unknown: list.some((r) => r.conversationId == null),
+    drafts: [...new Set(drafts)],
   };
 }
 
-// The ONLY way to get "replies written by our support team" out of a conversation list.
+// An agent reply that is a bot draft sent unchanged (kept ≥ 90% of its wording).
+export function isApprovedDraft(c, drafts) {
+  if (!drafts?.length) return false;
+  const text = c.body_text || stripHtml(c.body);
+  return drafts.some((d) => similarity(d, text) >= APPROVED_SIMILARITY);
+}
+
+// The ONLY way to get "replies written by our support team" out of a conversation list:
+// not the app's own public replies (botReply), and not a bot draft sent unchanged.
+// Edited drafts (< APPROVED_SIMILARITY) are the agent's words and do count.
 export function humanReplies(convos, bot) {
   if (bot.unknown) return [];
-  return (convos || []).filter((c) => isAgentReply(c) && !bot.ids.has(Number(c.id)));
+  return (convos || []).filter((c) => isAgentReply(c) && !bot.ids.has(Number(c.id)) && !isApprovedDraft(c, bot.drafts));
 }
 
 // Tickets the bot answered (ai-answered) or handled with a set response (ai-blocked).
+// Skipped by syncHistory, syncArchived and syncTicket alike.
 const isBotTagged = (tags, crm) =>
-  [crm.answeredTag, crm.blockedTag].filter(Boolean).some((x) => tags.includes(String(x).toLowerCase()));
+  [crm.answeredTag, crm.blockedTag].filter(Boolean).some((x) => (tags || []).map((t) => String(t).toLowerCase()).includes(String(x).toLowerCase()));
 
 // Never throws: the reply is already public, and a retry would post it twice.
 async function recordBotReply(ctx, store, ticketId, posted, kind) {
@@ -157,6 +189,48 @@ async function purgeLegacyBotHistory(ctx, store) {
   if (removed) await refreshHistoryCount(api, store);
   logger.info({ storeId: store.id, marked, removed }, "crm: removed the bot's own replies from ticket history");
   return { marked, removed };
+}
+
+// One-time (per store) clean-up for the 22 Nov 2026 additions: tickets where an agent
+// sent the bot's draft unchanged (similarity ≥ APPROVED_SIMILARITY) or that the bot
+// tagged ai-blocked may already be in crmHistory. Each one that is stored is re-synced
+// with the current rules; if Freshdesk can't return it, the stored row is dropped
+// (we can't prove its replies are the agent's own).
+async function purgeApprovedDraftHistory(ctx, store) {
+  const { api, logger } = ctx;
+  let checked = 0;
+  let removed = 0;
+  const filters = [
+    { storeId: { equals: store.id }, similarity: { greaterThanOrEqual: APPROVED_SIMILARITY } },
+    { storeId: { equals: store.id }, action: { equals: "blocked" } },
+  ];
+  const seen = new Set();
+  for (const filter of filters) {
+    let page = await api.internal.crmTicket.findMany({ filter, sort: [{ id: "Ascending" }], select: { ticketId: true }, first: 250 });
+    for (;;) {
+      for (const r of page) {
+        if (seen.has(r.ticketId)) continue;
+        seen.add(r.ticketId);
+        const h = await findHistory(api, store, r.ticketId);
+        if (!h) continue;
+        checked++;
+        try {
+          const res = await syncTicket(ctx, store, r.ticketId);
+          if (!res.saved) removed++;
+        } catch (err) {
+          if (err instanceof FreshdeskRateLimit) throw err; // flag not set: runs again next sync
+          logger.warn({ err, ticketId: r.ticketId }, "crm: re-sync for the draft clean-up failed; stored row dropped");
+          await api.internal.crmHistory.delete(h.id);
+          removed++;
+        }
+      }
+      if (!page.hasNextPage) break;
+      page = await page.nextPage();
+    }
+  }
+  if (checked) await refreshHistoryCount(api, store);
+  logger.info({ storeId: store.id, checked, removed }, "crm: re-checked ticket history for drafts sent unchanged");
+  return { checked, removed };
 }
 
 // ─────────────────────────── stores & state ───────────────────────────
@@ -493,8 +567,11 @@ export async function collectFeedback(ctx, store) {
     try {
       const convos = (await freshdesk(store, "GET", `/tickets/${row.ticketId}/conversations?per_page=100`)) || [];
       const after = new Date(row.createdAt).getTime();
-      // Only replies written by people: the bot's own (botReply) never count as the agent's final reply.
-      const bot = await botRepliesOn(api, store, row.ticketId);
+      // Only replies sent by people: the bot's own (botReply) never count as the agent's final reply.
+      // Drafts sent unchanged DO count here (drafts: []) — that is how similarity measures them;
+      // recentCorrections only uses edited ones (< APPROVED_SIMILARITY), and ticket history
+      // (humanReplies with drafts) leaves the unchanged ones out.
+      const bot = { ...(await botRepliesOn(api, store, row.ticketId)), drafts: [] };
       const reply = humanReplies(convos, bot).find((c) => new Date(c.created_at).getTime() > after);
       if (reply) {
         const finalReply = clip(reply.body_text || stripHtml(reply.body), 8000);
@@ -590,6 +667,14 @@ export async function syncHistory(ctx, store) {
       logger.warn({ err, storeId: store.id }, "crm: bot history purge failed; it runs again next sync");
     }
   }
+  if (!store.crmState?.draftPurgeAt) {
+    try {
+      const purge = await purgeApprovedDraftHistory(ctx, store);
+      await saveState(api, store, { draftPurgeAt: new Date().toISOString(), draftPurge: purge });
+    } catch (err) {
+      logger.warn({ err, storeId: store.id }, "crm: approved-draft history clean-up failed; it runs again next sync");
+    }
+  }
   const state = store.crmState || {};
   // Rolling 12-month window. historyFrom records where the stored history starts;
   // stores first synced under the old 90-day lookback (no historyFrom, or a later
@@ -615,7 +700,11 @@ export async function syncHistory(ctx, store) {
       for (const t of tickets) {
         if (examined >= MAX_HISTORY_PER_RUN) { more = true; break outer; }
         const tags = (t.tags || []).map((x) => String(x).toLowerCase());
-        if ([STATUS_RESOLVED, STATUS_CLOSED].includes(t.status)) {
+        if (isBotTagged(tags, crm)) {
+          // ai-answered / ai-blocked: never stored; drop anything stored before.
+          const existing = await findHistory(api, store, t.id);
+          if (existing) await api.internal.crmHistory.delete(existing.id);
+        } else if ([STATUS_RESOLVED, STATUS_CLOSED].includes(t.status)) {
           const existing = await findHistory(api, store, t.id);
           // Already stored as of this update (e.g. a backfill re-walking the old window).
           if (existing?.ticketUpdatedAt && new Date(existing.ticketUpdatedAt).getTime() === new Date(t.updated_at).getTime()) {
@@ -764,6 +853,10 @@ export async function syncTicket(ctx, store, ticketId, ticket = null) {
   const t = ticket || (await freshdesk(store, "GET", `/tickets/${ticketId}`));
   if (!t) return { saved: false, reason: "ticket not found" };
   const existing = await findHistory(api, store, t.id);
+  if (isBotTagged(t.tags, resolveCrm(store))) {
+    if (existing) await api.internal.crmHistory.delete(existing.id);
+    return { saved: false, reason: "tagged ai-answered / ai-blocked" };
+  }
   const convos = (await freshdesk(store, "GET", `/tickets/${t.id}/conversations?per_page=100`)) || [];
   const bot = await botRepliesOn(api, store, t.id);
   const answer = humanReplies(convos, bot).map((c) => clip(c.body_text || stripHtml(c.body), 3000)).join("\n---\n");

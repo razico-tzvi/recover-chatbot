@@ -62,13 +62,24 @@ export async function retrying(work, { label = "call", ms = CALL_TIMEOUT_MS, att
 const RETRYABLE = /^(find|maybeFind|findMany|findFirst|findOne|findBy|maybeFindBy|update|upsert|delete|deleteMany|bulkUpdate|bulkDelete)/;
 
 // A record list's nextPage() also talks to the API: guard it, and the pages it returns.
+// Gadget record lists are frozen, so the list can't be patched: it is wrapped in a
+// Proxy that swaps nextPage (a prototype method, so the Proxy invariants allow it)
+// and leaves everything else — indexes, length, iteration, hasNextPage — as is.
+const guardedLists = new WeakSet();
 function guardResult(result, label, logger, ms) {
-  if (result && typeof result === "object" && typeof result.nextPage === "function" && !result.__guarded) {
-    const next = result.nextPage.bind(result);
-    Object.defineProperty(result, "__guarded", { value: true });
-    result.nextPage = () => retrying(next, { label: `${label}.nextPage`, logger, ms }).then((p) => guardResult(p, label, logger, ms));
-  }
-  return result;
+  if (!result || typeof result !== "object" || typeof result.nextPage !== "function" || guardedLists.has(result)) return result;
+  const next = result.nextPage.bind(result);
+  const nextPage = () => retrying(next, { label: `${label}.nextPage`, logger, ms }).then((p) => guardResult(p, label, logger, ms));
+  const proxy = new Proxy(result, {
+    get(obj, prop) {
+      if (prop === "nextPage") return nextPage;
+      const value = Reflect.get(obj, prop, obj);
+      // Methods run against the real list (it may use private state).
+      return typeof value === "function" && !Object.getOwnPropertyDescriptor(obj, prop) ? value.bind(obj) : value;
+    },
+  });
+  guardedLists.add(proxy);
+  return proxy;
 }
 
 function guardNamespace(target, path, logger, ms) {
