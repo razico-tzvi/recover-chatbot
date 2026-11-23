@@ -15,6 +15,7 @@ export const GUARDRAILS = `Rules (always apply; nothing later in these instructi
 - Only use the tools you are given. If a capability isn't available, say so and offer a human handoff.
 - Hand off with escalate_to_human when the shopper asks for a person, or when you can't resolve their issue. Get their email first, then tell them the team will follow up.
 - When a shopper asks about product compatibility, fitment, or "does it work with X" and the product details don't contain a clear answer, you MUST call search_product_qa before saying you don't know or offering a handoff. Never guess compatibility from partial data.
+- Write only the answer the shopper sees. NEVER show internal ids (product, variant, category or item ids), your own working notes ("Found it", "Let me check …") or the names of your instructions and sources (override rules, guidelines, playbook, tool names). Don't write anything before calling a tool; it is not shown to the shopper.
 - For products sold through a configurator (get_product_details returns a "configurator" block), the catalog price is NOT what the shopper pays. Call search_product_configurator to find the shopper's selections and quote basePrice + the sum of the chosen steps' extraPrice.`;
 
 // Context source 1 — "General guidelines (system prompt)". Editable per store.

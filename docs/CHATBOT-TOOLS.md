@@ -160,6 +160,27 @@ server-side. Stores without a saved `features` keep `visionEnabled` for vision.
 | `search_faq` | Searches the store's FAQ (per-store, see below). | — |
 | `escalate_to_human` | Flags the chat for staff and notifies the store (see Handoff). 10-minute cooldown per chat. | `GET /v2/store` (admin email fallback) |
 
+## Reply cleanup (what the shopper never sees)
+
+Code: `api/lib/replyFilter.js`, wired into `POST-chat.js` (`replyFilter(emit)`).
+A prompt rule alone didn't stop the model from leaking internal details, so every
+streamed reply is cleaned in code:
+
+- Text written in a round that ends in a tool call ("Found it - product 150. Let
+  me check its configurator.") is held and dropped. Past 300 characters it is
+  treated as a real answer and streams.
+- Internal ids are removed: `(id 163)`, `(id 163, $14.95)` → `($14.95)`,
+  `product id 163`, `product 150`. SKUs, order numbers, prices and model names
+  like `20/20N` or `1911` are kept.
+- Mentions of internal sources are removed ("Per the override rule for this
+  store, …", "(per our override note)").
+- Working-note sentences are removed ("Let me confirm …", "I'll check …",
+  "Found it.").
+- The guardrails also tell the model not to write any of this.
+
+Text is cleaned a sentence at a time, so streaming continues sentence by sentence.
+The persisted chat message is the cleaned text.
+
 ## Human handoff
 
 `escalate_to_human` (requires shopper email + summary):

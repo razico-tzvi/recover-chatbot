@@ -14,6 +14,7 @@ import {
 } from "../lib/productConfigurator";
 import { searchUgcMedia } from "../lib/ugc";
 import { searchAgentAnswers } from "../lib/crm";
+import { replyFilter } from "../lib/replyFilter";
 
 /**
  * POST /chat — the storefront widget's endpoint.
@@ -141,14 +142,18 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
   const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   const signals = { products: [], coupons: [], shippingEstimates: 0, faqMisses: [] };
   const emit = (t) => { if (t) { assistantText += t; write({ type: "delta", text: t }); } };
+  // Model text goes through the filter: drops text written before a tool call
+  // and strips internal ids / working notes / source names (api/lib/replyFilter.js).
+  const filter = replyFilter(emit, logger);
 
   try {
     await runChatStream({
       provider, baseUrl, model, apiKey, messages, bc, logger, fixedSystem, dynamicSystem, tools, allowed,
       api, sessionId, storeHash, store, emails, ip, safeguards, toolsUsed, usage, signals,
-      onDelta: emit,
+      onDelta: filter.delta, onToolRound: filter.toolRound,
       onStatus: (key) => write({ type: "status", tool: key, text: STATUS_TEXT[key] || STATUS_TEXT.working }),
     });
+    filter.finish();
 
     if (!assistantText.trim()) {
       logger.warn({ sessionId, toolsUsed }, "chat finished with no answer text; sending fallback");
@@ -157,6 +162,7 @@ const route = async ({ request, reply, api, logger, connections, emails }) => {
     write({ type: "done" });
   } catch (err) {
     logger.error({ err }, "chat stream failed");
+    filter.finish();
     if (err instanceof StepTimeoutError) {
       emit((assistantText.trim() ? "\n\n" : "") + TRY_AGAIN_TEXT);
       write({ type: "done" });
@@ -812,7 +818,7 @@ async function runChatStream(opts) {
   const common = {
     model: opts.model, apiKey: opts.apiKey, messages: opts.messages,
     fixedSystem: opts.fixedSystem, dynamicSystem: opts.dynamicSystem,
-    tools: opts.tools, ctx, onDelta: opts.onDelta,
+    tools: opts.tools, ctx, onDelta: opts.onDelta, onToolRound: opts.onToolRound || (() => { }),
   };
   if (opts.provider === "anthropic") return runAnthropicStream(common);
   return runOpenAIStream({ ...common, baseUrl: opts.baseUrl, system: (opts.fixedSystem || "") + (opts.dynamicSystem || "") });
@@ -847,7 +853,7 @@ async function forEachSSE(res, onData, label = "LLM stream") {
   }
 }
 
-async function runOpenAIStream({ baseUrl, model, apiKey, messages, system, tools, ctx, onDelta }) {
+async function runOpenAIStream({ baseUrl, model, apiKey, messages, system, tools, ctx, onDelta, onToolRound }) {
   const convo = [{ role: "system", content: system }, ...messages.map((m) => ({ role: m.role, content: openaiContent(m) }))];
   for (let i = 0; i <= MAX_ITERATIONS; i++) {
     const lastRound = i === MAX_ITERATIONS;
@@ -889,7 +895,7 @@ async function runOpenAIStream({ baseUrl, model, apiKey, messages, system, tools
       const result = await runTool(call.function?.name, safeJson(call.function?.arguments), ctx);
       convo.push({ role: "tool", tool_call_id: call.id, content: result });
     }
-    if (content.trim()) onDelta("\n\n");
+    onToolRound();
   }
 }
 
@@ -930,7 +936,7 @@ function formatMessagesWithCacheControl(messages) {
   });
 }
 
-async function runAnthropicStream({ model, apiKey, messages, fixedSystem, dynamicSystem, tools: openaiTools, ctx, onDelta }) {
+async function runAnthropicStream({ model, apiKey, messages, fixedSystem, dynamicSystem, tools: openaiTools, ctx, onDelta, onToolRound }) {
   const tools = openaiTools.map((t) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters }));
   const convo = messages.map((m) => ({ role: m.role === "assistant" ? "assistant" : "user", content: anthropicContent(m) }));
 
@@ -1033,7 +1039,7 @@ async function runAnthropicStream({ model, apiKey, messages, fixedSystem, dynami
         toolResults.push({ type: "tool_result", tool_use_id: b.id, content: result });
       }
       convo.push({ role: "user", content: toolResults });
-      if (assistant.some((b) => b.type === "text")) onDelta("\n\n");
+      onToolRound();
       continue;
     }
     return;
