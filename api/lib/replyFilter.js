@@ -14,7 +14,7 @@ export const HOLD_CHARS = 300;
 // Sentence buffer: flush even without a sentence end past this length.
 const MAX_PENDING = 600;
 
-const ID = String.raw`(?:product\s+)?\bid\b\s*[:#]?\s*\d+(?![\/\w])|\bproduct\s*#?\s*\d+(?![\/\w])`;
+const ID = String.raw`(?:product\s+)?\bid\b\s*[:#=]?\s*\d+(?![\/\w])|\bproduct\s*#?\s*\d+(?![\/\w])`;
 const SOURCE = String.raw`(?:override\s+(?:rules?|notes?|instructions?)|store\s+guidelines|(?:general\s+)?guidelines\s+(?:i(?:'ve| have)\s+been\s+given)|system\s+prompt|internal\s+(?:rules?|notes?))`;
 
 // Marks where a sentence lead-in was cut, for re-capitalizing.
@@ -28,8 +28,12 @@ const RULES = [
   // "($14.95, id 163)" → "($14.95)"
   [new RegExp(String.raw`\s*[,;]\s*(?:${ID})(?=\s*\))`, "gi"), ""],
   // "(product id 163, titled …)" leftovers and bare "product id 163" / "id 163" / "product 150"
-  [new RegExp(String.raw`,?\s*(?:\bproduct\s+)?\bid\b\s*[:#]?\s*\d+(?![\/\w])`, "gi"), ""],
+  [new RegExp(String.raw`,?\s*(?:\bproduct\s+)?\bid\b\s*[:#=]?\s*\d+(?![\/\w])`, "gi"), ""],
   [/\b(products?)\s+#?\d{2,}(?![\/\w]|\.\d)/gi, "$1"],
+  // A lone id label whose number is gone: "(id works with …)" → "(works with …)".
+  // Lower-case only, so "(ID required)" / "photo ID" stay.
+  [/\(\s*(?:product\s+)?id\b\s*[:#=]?\s*(?=[^\d\s])/g, "("],
+  [/([,;]\s*)(?:product\s+)?id\b\s*[:#=]?\s*(?=\))/g, ""],
   // "Per the override rule for this store, that's …" / "(per our override note)"
   [new RegExp(String.raw`\s*\(\s*(?:as\s+|according\s+to\s+|per\s+)(?:the|our|my|this\s+store'?s)\s+${SOURCE}[^)]*\)`, "gi"), ""],
   [new RegExp(String.raw`\b(?:as\s+|according\s+to\s+|per\s+|based\s+on\s+)(?:the|our|my|this\s+store'?s)\s+${SOURCE}(?:\s+for\s+this\s+store)?\s*[,:—–-]?\s*`, "gi"), CUT],
@@ -48,15 +52,44 @@ export function cleanReply(text) {
   // so bare links at a line start ("https://…") are left alone.
   s = s.replace(new RegExp(String.raw`(^|[.!?]\s+|\n[ \t]*)${CUT}([a-z])`, "g"), (m, lead, c) => lead + c.toUpperCase());
   s = s.split(CUT).join("");
-  return s.replace(/[ \t]{2,}/g, " ").replace(/ +([,.;:!?])/g, "$1").replace(/\(\s*\)/g, "");
+  return s
+    .replace(/\(\s*[—–\-,;:]+\s*/g, "(") // "( — works …)" left by a removed id
+    .replace(/\(\s+/g, "(")
+    .replace(/[ \t]{2,}/g, " ").replace(/ +([,.;:!?])/g, "$1").replace(/\s*\(\s*\)/g, "");
 }
 
-// Index just past the last sentence end (". ", "!\n", "\n" …), or 0.
-function lastBoundary(s) {
-  const re = /[.!?:](?=\s)|\n/g;
-  let k = 0, m;
-  while ((m = re.exec(s))) k = m.index + 1;
+// Text that may be the start of an id still being streamed ("(id", "product id:",
+// "(id 16"): never cut a chunk right after it, or the number arrives in the next
+// chunk and the label is left behind.
+const ID_TAIL = /(?:\(\s*)?(?:\bproduct\s*(?:\bid\b)?|\bid\b|#)\s*[:#=]?\s*\d*\s*$/i;
+
+// Index just past the last sentence end (". ", "!\n", "\n" …) that is safe to
+// cut at, or 0. Safe = outside any open "( … )" (so "(id: 163, $14.95)" is
+// cleaned in one piece) and not right after an id label ("Product id: 163").
+// A blank line closes any parenthesis left open.
+export function lastBoundary(s) {
+  let k = 0, depth = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "(") depth++;
+    else if (c === ")") depth = Math.max(0, depth - 1);
+    else if (c === "\n" && s[i + 1] === "\n") depth = 0;
+    const end = c === "\n" || (/[.!?:]/.test(c) && /\s/.test(s[i + 1] || ""));
+    if (end && depth === 0 && !ID_TAIL.test(s.slice(Math.max(0, i - 40), i + 1))) k = i + 1;
+  }
   return k;
+}
+
+// Forced cut for an over-long buffer: the last space that doesn't split an id.
+function forcedCut(s) {
+  let k = s.length;
+  for (;;) {
+    const m = ID_TAIL.exec(s.slice(Math.max(0, k - 40), k));
+    if (!m || !m[0].trim()) break;
+    k = Math.max(0, k - 40) + m.index;
+  }
+  const sp = s.lastIndexOf(" ", k);
+  return sp > 0 ? sp + 1 : k;
 }
 
 /**
@@ -78,7 +111,8 @@ export function replyFilter(send, logger) {
   };
   const release = (t) => {
     pending += t;
-    const k = pending.length > MAX_PENDING ? pending.length : lastBoundary(pending);
+    let k = lastBoundary(pending);
+    if (!k && pending.length > MAX_PENDING) k = forcedCut(pending);
     if (k > 0) { out(cleanReply(pending.slice(0, k))); pending = pending.slice(k); }
   };
 

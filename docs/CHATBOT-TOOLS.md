@@ -181,6 +181,10 @@ streamed reply is cleaned in code:
 - The guardrails also tell the model not to write any of this.
 
 Text is cleaned a sentence at a time, so streaming continues sentence by sentence.
+A chunk is never cut inside an open `( … )` or right after an id label
+(`id:`, `product id`, `#`), so an id split across streamed chunks is still
+removed whole; a leftover lower-case label with no number (`(id works …)`) is
+dropped too. Streamed output matches cleaning the whole reply at once.
 The persisted chat message is the cleaned text.
 
 ## Human handoff
